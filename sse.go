@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 )
 
@@ -35,24 +34,34 @@ func newStreamError(data []byte) *streamError {
 	}
 	fields := map[string]json.RawMessage{}
 	_ = json.Unmarshal(detail, &fields)
-	code := jsonString(fields["code"])
-	status := http.StatusBadGateway
-	switch code {
-	case "rate_limit_exceeded", "usage_limit_reached", "rate_limit_error":
-		status = http.StatusTooManyRequests
-	case "server_is_overloaded", "server_overloaded":
-		status = http.StatusServiceUnavailable
+	status := streamErrorStatus(jsonString(fields["code"]))
+	if status == http.StatusBadGateway {
+		status = streamErrorStatus(jsonString(fields["type"]))
 	}
 	body, _ := json.Marshal(map[string]json.RawMessage{"error": detail})
 	return &streamError{body: body, status: status}
+}
+
+func streamErrorStatus(signal string) int {
+	switch signal {
+	case "rate_limit_exceeded", "usage_limit_reached", "rate_limit_error", "too_many_requests", "insufficient_quota":
+		return http.StatusTooManyRequests
+	case "context_length_exceeded", "invalid_prompt", "invalid_request_error", "invalid_value", "unsupported_parameter":
+		return http.StatusBadRequest
+	case "invalid_api_key", "authentication_error":
+		return http.StatusUnauthorized
+	case "server_is_overloaded", "server_overloaded":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusBadGateway
+	}
 }
 
 // collectResponse retains completed output items because Codex may omit them
 // from the terminal response object. Deltas are never concatenated into guessed
 // messages: tool calls, reasoning, images, and unknown items remain native JSON.
 func collectResponse(reader io.Reader) ([]byte, error) {
-	items := map[int]json.RawMessage{}
-	var outputBytes int
+	output := newResponseOutput()
 	var result []byte // Nil signals no terminal event yet, not an API array.
 	err := readSSE(reader, func(data []byte) (bool, error) {
 		if bytes.Equal(data, []byte("[DONE]")) {
@@ -69,42 +78,13 @@ func collectResponse(reader io.Reader) ([]byte, error) {
 		}
 		switch event.Type {
 		case "response.output_item.done":
-			if len(event.Item) == 0 || bytes.Equal(event.Item, []byte("null")) {
-				return false, errors.New("upstream output event missing item")
+			if err := output.add(event.OutputIndex, event.Item); err != nil {
+				return false, err
 			}
-			outputBytes += len(event.Item) - len(items[event.OutputIndex])
-			if outputBytes > maxJSONBytes {
-				return false, errors.New("upstream output exceeds size limit")
-			}
-			items[event.OutputIndex] = bytes.Clone(event.Item)
 		case "response.completed", "response.done", "response.incomplete", "response.failed":
-			response := map[string]json.RawMessage{}
-			if err := json.Unmarshal(event.Response, &response); err != nil || response == nil {
-				return false, errors.New("upstream terminal event missing response")
-			}
-			output := []json.RawMessage{}
-			if raw, ok := response["output"]; ok {
-				if err := json.Unmarshal(raw, &output); err != nil {
-					return false, errors.New("invalid upstream response output")
-				}
-			}
-			if len(output) == 0 {
-				indexes := make([]int, 0, len(items))
-				for index := range items {
-					indexes = append(indexes, index)
-				}
-				slices.Sort(indexes)
-				output = make([]json.RawMessage, 0, len(indexes))
-				for _, index := range indexes {
-					output = append(output, items[index])
-				}
-				setJSON(response, "output", output)
-			}
-			result, _ = json.Marshal(response)
-			if len(result) > maxJSONBytes {
-				return false, errors.New("upstream response exceeds size limit")
-			}
-			return true, nil
+			var err error
+			result, err = output.complete(event.Response)
+			return true, err
 		case "error":
 			return false, newStreamError(data)
 		}

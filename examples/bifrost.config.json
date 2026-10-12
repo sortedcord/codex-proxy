@@ -1,0 +1,31 @@
+{
+  "providers": {
+    "codex-proxy": {
+      "keys": [
+        {
+          "name": "codex-proxy-key",
+          "value": "env.CODEX_PROXY_API_KEY",
+          "models": ["*"],
+          "weight": 1.0
+        }
+      ],
+      "network_config": {
+        "base_url": "http://127.0.0.1:8081",
+        "default_request_timeout_in_seconds": 300,
+        "stream_idle_timeout_in_seconds": 300,
+        "max_retries": 0
+      },
+      "openai_config": {
+        "disable_store": true
+      },
+      "custom_provider_config": {
+        "base_provider_type": "openai",
+        "allowed_requests": {
+          "list_models": true,
+          "responses": true,
+          "responses_stream": true
+        }
+      }
+    }
+  }
+}

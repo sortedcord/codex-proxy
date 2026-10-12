@@ -178,11 +178,12 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request, compact bool) 
 	}
 	copyResponseHeaders(w.Header(), resp.Header)
 	if prepared.stream {
+		streamReader := newResponseStreamReader(reader, prepared.metadata)
 		p.forwardStream(
 			w,
 			r,
 			resp,
-			reader,
+			streamReader,
 		)
 		return
 	}
@@ -195,6 +196,13 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request, compact bool) 
 		}
 		p.upstreamError(w, r, err)
 		return
+	}
+	if len(prepared.metadata) > 0 {
+		result, err = responseMetadata(result, prepared.metadata)
+		if err != nil {
+			p.upstreamError(w, r, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -456,8 +464,17 @@ func writeJSON(w http.ResponseWriter, status int, body []byte) {
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
+	errorType := "invalid_request_error"
+	switch {
+	case status == http.StatusUnauthorized:
+		errorType = "authentication_error"
+	case status == http.StatusTooManyRequests:
+		errorType = "rate_limit_error"
+	case status >= 500:
+		errorType = "server_error"
+	}
 	body, _ := json.Marshal(map[string]any{
-		"error": map[string]string{"type": "proxy_error", "code": code, "message": message},
+		"error": map[string]any{"type": errorType, "code": code, "message": message, "param": nil},
 	})
 	writeJSON(w, status, body)
 }

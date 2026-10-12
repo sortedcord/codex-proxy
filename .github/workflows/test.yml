@@ -24,3 +24,21 @@ jobs:
       - run: go vet ./...
       - run: go test -race -cover ./...
       - run: go build -trimpath -ldflags='-s -w' -o bin/codex-proxy .
+
+  bifrost:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: integration/bifrost/go.sum
+      - name: Check Bifrost test formatting
+        run: test -z "$(gofmt -l integration/bifrost/*.go)"
+      - name: Vet Bifrost test module
+        working-directory: integration/bifrost
+        run: go vet ./...
+      - name: Test the real Bifrost OpenAI provider against a fake Codex backend
+        env:
+          CODEX_PROXY_BIFROST_TEST: '1'
+        run: go test -race -run '^TestBifrostCompatibility$' -v -timeout 10m

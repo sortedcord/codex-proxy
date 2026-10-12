@@ -1,8 +1,8 @@
 # codex-proxy
 
 A small, single-account HTTP proxy from the **OpenAI Responses API** to the
-**ChatGPT Codex backend**. Written in Go using only the standard library: no
-third-party modules, provider framework, database, or admin interface.
+**ChatGPT Codex backend**. The runtime uses only Go's standard library: no
+third-party dependencies, provider framework, database, or admin interface.
 
 It reuses a file-backed `codex login` session. It does **not** proxy the ChatGPT
 website or route to the paid OpenAI developer API.
@@ -75,6 +75,48 @@ print(response.output_text)
 The SDK's `api_key` authenticates to **this proxy**, not OpenAI. The proxy never
 forwards it upstream. Installing the SDK is optional and not a proxy dependency.
 
+### Bifrost OpenAI provider
+
+Use an **OpenAI-based custom provider** named `codex-proxy`. The ready-to-merge
+configuration is [`examples/bifrost.config.json`](examples/bifrost.config.json),
+based on Bifrost's [OpenAI provider documentation](https://docs.getbifrost.ai/providers/supported-providers/openai#openai)
+and verified against its real **core v1.11.3** provider.
+
+1. Set the same `CODEX_PROXY_API_KEY` environment variable in both processes.
+   This is a local proxy key, **not** a Codex OAuth token or an OpenAI API key.
+2. Run `./bin/codex-proxy -addr 127.0.0.1:8081`. Port `8081` avoids Bifrost's
+   default gateway port, `8080`.
+3. Merge the example's provider into Bifrost's configuration. Set its base URL to
+   `http://127.0.0.1:8081`, **without `/v1`**: Bifrost appends `/v1/responses`.
+   Enable `disable_store`; permit only `responses`, `responses_stream`, and
+   `list_models`. Supplied `allowed_requests` flags use an allowlist, so omitted
+   operations stay disabled. Automatic provider retries are disabled.
+4. Call Bifrost using the provider-prefixed model name:
+
+```sh
+curl http://127.0.0.1:8080/openai/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"codex-proxy/gpt-5.5","input":"Reply with hello.","stream":false}'
+```
+
+Add your gateway's authentication header if Bifrost requires one; it is separate
+from the proxy key. Use `stream:true` with `curl -N` for SSE. In the OpenAI SDK,
+the Bifrost-facing base URL is `http://127.0.0.1:8080/openai/v1`, not the proxy URL.
+
+If Bifrost runs in Docker or on another host, loopback points at **Bifrost's own
+network namespace**. Set a reachable proxy address and configure Bifrost's
+`network_config.allow_private_network: true` for private-address connections.
+A non-loopback proxy listener requires a local key; protect remote access with
+TLS and a firewall. Never give Bifrost the Codex credential file.
+
+Verified: model discovery, text and image inputs, structured JSON output,
+metadata, streaming terminal output, function calls with full-history replay,
+and HTTP/in-band errors. This is Responses wire compatibility, **not every
+OpenAI feature**: background jobs, stored-response lifecycle, conversation IDs,
+stored prompt references, and unsupported Codex sampling/limits are unavailable.
+Compaction remains upstream-dependent and is deliberately not enabled in the
+Bifrost example. See the compatibility notes below.
+
 ## HTTP surface
 
 | Method | Route | Behavior |
@@ -100,10 +142,11 @@ The subscription backend is not a drop-in implementation of every developer API
 feature. The proxy performs only the compatibility adjustments needed here:
 
 - Sends `stream:true` and `store:false` upstream. Non-streaming requests collect
-  the terminal response and, if necessary, rebuild its output from completed SSE
-  items in `output_index` order. Tool calls, encrypted reasoning, usage, and
-  extension fields are retained; native failed/incomplete terminal responses
-  retain their status.
+  the terminal response. In **both modes**, omitted terminal output is rebuilt
+  from completed native SSE items in `output_index` order. Tool calls, encrypted
+  reasoning, usage, and extension fields are retained; native failed/incomplete
+  terminal responses retain their status. Deltas, event IDs, retry fields,
+  comments, and sequence numbers are not synthesized.
 - Converts string input into a user message, `system` messages into `developer`
   messages, and empty string function arguments into `"{}"`.
 - Defaults `instructions` to an empty string, defaults `parallel_tool_calls` to
@@ -114,13 +157,20 @@ feature. The proxy performs only the compatibility adjustments needed here:
 - Removes `user`, `prompt_cache_options`, `prompt_cache_retention`,
   `context_management`, and input `prompt_cache_breakpoint` hints. Maps the `fast`
   service-tier alias to `priority`; other tiers are left for upstream validation.
-- Rejects background execution and non-null `previous_response_id`. For
-  multi-turn conversations, send full history, including prior output items and
-  tool results. No server-side conversation or replay cache is maintained.
+- Keeps request `metadata` locally and echoes it in JSON responses and streamed
+  response envelopes; Codex rejects that parameter. Metadata is not persisted.
+  Removes `stream_options.include_usage`: native terminal events already include
+  usage. Other native stream options are preserved.
+- Rejects background execution, non-null `previous_response_id`, `conversation`,
+  and stored `prompt` references. For multi-turn conversations, send full history,
+  including prior output items and tool results. No server-side conversation or
+  replay cache is maintained.
 - Preserves upstream HTTP errors, retry hints, request IDs, and Codex turn-state
   headers. Streaming in-band errors pass through unchanged; collected in-band
-  errors become JSON errors (`429` for known quota errors, `503` for known overload
-  errors, `502` otherwise). Streams are never replayed after delivery starts.
+  errors become JSON errors (`400` for known request/context errors, `401` for
+  authentication errors, `429` for quota errors, `503` for overload, `502`
+  otherwise). Proxy-generated errors use standard OpenAI error types. Streams
+  are never replayed after delivery starts.
 
 No chat completions, Anthropic/Gemini translation, account pooling, load
 balancing, automatic tool execution, WebSockets, realtime/audio, search-specific
@@ -176,9 +226,10 @@ and `NO_PROXY` environment variables are honored by Go's transport.
   account's quota when a downstream key is not configured.
 - Authorization, cookies, account overrides, and hop-by-hop headers from clients
   are not forwarded. Logging excludes prompts, responses, and token values.
-- Request bodies are capped at 16 MiB; buffered JSON responses at 32 MiB; collected
-  SSE events at 16 MiB. Streaming uses a 32 KiB copy buffer, immediate flushing,
-  disconnect cancellation, and an idle watchdog rather than a whole-turn timeout.
+- Request bodies are capped at 16 MiB; buffered JSON responses and retained
+  completed output at 32 MiB; SSE frames at 16 MiB. Streaming uses bounded frame
+  buffers and a 32 KiB copy buffer, immediate flushing, disconnect cancellation,
+  and an idle watchdog rather than a whole-turn timeout.
   Header/body ingestion and blocked downstream writes have bounded deadlines.
 - `SIGINT`/`SIGTERM` drain requests for up to ten seconds, then close connections.
   Shutdown also waits for any in-flight OAuth refresh (bounded to 30 seconds) so
@@ -198,6 +249,16 @@ go test -race -cover ./...
 go vet ./...
 go test -run '^$' -fuzz FuzzPrepareRequest -fuzztime 5s
 go test -run '^$' -fuzz FuzzCollectResponse -fuzztime 5s
+go test -run '^$' -fuzz FuzzMetadataStream -fuzztime 5s
+```
+
+The actual Bifrost provider is pinned in a **separate test-only module**, so it
+adds no runtime dependencies and does not change the proxy's Go 1.22 minimum.
+Its current SDK requires **Go 1.27+**. CI runs this test with a fake Codex backend:
+
+```sh
+CODEX_PROXY_BIFROST_TEST=1 \
+  go test -race -run '^TestBifrostCompatibility$' -v -timeout 10m
 ```
 
 Opt-in live tests use the installed credentials and consume account quota:
@@ -210,7 +271,15 @@ CODEX_PROXY_LIVE_TEST=1 CODEX_PROXY_TEST_CODEX=1 \
   go test -run TestLiveProxy -v -timeout 5m
 ```
 
-Set `CODEX_PROXY_TEST_MODEL` to override the live test's `gpt-5.5` default.
+To run model discovery, text/image input, structured JSON, metadata, streaming,
+and a tool round trip through **Bifrost's real provider and real Codex**:
+
+```sh
+CODEX_PROXY_BIFROST_LIVE_TEST=1 \
+  go test -race -run '^TestBifrostLive$' -v -timeout 10m
+```
+
+Set `CODEX_PROXY_TEST_MODEL` to override the live tests' `gpt-5.5` default.
 Development verification covered live model discovery, both response modes,
 a full-history function-call/result round trip, and official `codex exec` over
 HTTP/SSE. Token rotation/failure, redirects, credential/header isolation,
@@ -223,7 +292,9 @@ covered by local tests rather than deliberately invalidating live credentials.
 - `auth.go`: Codex credential loading, refresh, and persistence.
 - `proxy.go`: narrow routing and upstream/downstream credential boundaries.
 - `request.go`: minimal Codex request normalization.
-- `sse.go`, `idle_reader.go`: non-streaming collection and stream liveness.
+- `sse.go`, `response_output.go`: SSE collection and bounded native output repair.
+- `response_stream.go`, `idle_reader.go`: SSE framing, metadata, and stream liveness.
+- `integration/bifrost/`: isolated conformance tests against Bifrost's OpenAI provider.
 
 Reference project checkouts, binaries, authentication files, and runtime state
 are intentionally ignored by Git.

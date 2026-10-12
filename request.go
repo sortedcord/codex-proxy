@@ -9,10 +9,11 @@ import (
 )
 
 type preparedRequest struct {
-	body   []byte
-	stream bool
-	model  string
-	tier   string
+	body     []byte
+	stream   bool
+	model    string
+	tier     string
+	metadata json.RawMessage
 }
 
 func prepareRequest(body []byte, compact bool) (preparedRequest, error) {
@@ -44,6 +45,35 @@ func prepareRequest(body []byte, compact bool) (preparedRequest, error) {
 	}
 	delete(object, "previous_response_id")
 	delete(object, "background")
+	for _, field := range []string{"conversation", "prompt"} {
+		if raw := object[field]; len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
+			return prepared, errors.New(field + " references are unsupported; send full input history and instructions")
+		}
+		delete(object, field)
+	}
+	if raw, ok := object["metadata"]; ok && !bytes.Equal(raw, []byte("null")) {
+		metadata := map[string]json.RawMessage{}
+		if err := json.Unmarshal(raw, &metadata); err != nil || metadata == nil {
+			return prepared, errors.New("metadata must be an object")
+		}
+		prepared.metadata = bytes.Clone(raw)
+	}
+	// Metadata is client-side bookkeeping, not a Codex backend parameter.
+	delete(object, "metadata")
+	if raw, ok := object["stream_options"]; ok && !bytes.Equal(raw, []byte("null")) {
+		options := map[string]json.RawMessage{}
+		if err := json.Unmarshal(raw, &options); err != nil || options == nil {
+			return prepared, errors.New("stream_options must be an object")
+		}
+		// Bifrost's documented include_usage hint is not a Codex parameter.
+		// Usage already arrives in every native terminal response.
+		delete(options, "include_usage")
+		if len(options) == 0 {
+			delete(object, "stream_options")
+		} else {
+			setJSON(object, "stream_options", options)
+		}
+	}
 
 	input, err := normalizeInput(object["input"])
 	if err != nil {
