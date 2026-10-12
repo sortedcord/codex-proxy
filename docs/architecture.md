@@ -1,0 +1,77 @@
+# Architecture
+
+The organization follows `sortedcord/antigravity-proxy`, but protocol/provider logic
+remains Codex-specific and standard-library-only:
+
+- `cmd/codex-proxy`: CLI parsing, signals, exit behavior.
+- `internal/config`: flags, environment, trust-boundary and key validation.
+- `internal/oauth`: native Codex auth documents, serialized refresh, identity hints,
+  PKCE browser sessions, and atomic account replacement.
+- `internal/proxy`: runtime ownership, authenticated routing, Responses transport,
+  request normalization, terminal output repair, streaming metadata and idle watchdog.
+- `internal/quota`: Codex usage requests and normalization of provider-reported limit
+  families/windows. No local estimation or Google model-pool assumptions.
+- `internal/status`: independent polling, cached read APIs, private bounded journals,
+  account attribution, staleness and historical filtering.
+- `internal/storage`: regular-file checks, private atomic writes and native OS locks.
+
+## Inference fidelity
+
+Only the necessary Codex compatibility fields are normalized. Native completed output
+items and raw JSON retain numeric precision and unknown extension fields. SSE preserves
+frames except response metadata and missing terminal output; it does not fabricate
+messages from delta text. Non-streaming collects the same native terminal semantics.
+
+The downstream inference key is never an upstream token. The proxy selects the account
+credential itself, ignores client cookies/account overrides, and forwards only safe
+headers. Authentication recovery is bounded to three attempts and one reactive refresh;
+no inference replay occurs after streaming starts.
+
+## Login commit boundary
+
+There is one active native auth document, not an account scheduler. A login attempt owns
+random state, a PKCE verifier, a temporary allowlisted callback listener and an expiry
+timer. A code is exchanged at most once. Only tokens returned from the trusted OAuth
+endpoint can reach activation; the API does not accept token uploads.
+
+Activation validates identity and prepares that account's journal **before** saving.
+The auth mutex serializes refresh and replacement. Save commits a synced private file
+and then updates the anchored account before releasing the mutex. A post-rename sync
+failure publishes the disk account with explicit durability uncertainty, not fake
+rollback. Pre-commit failure keeps the old account unchanged.
+
+Each request obtains a credential snapshot. Recovery compares the rejected snapshot's
+account ID and login generation before adopting newer tokens. Even a fresh login into
+the same workspace cannot replay an old request under replacement credentials. External file account replacement
+is not an implicit authorized hot-switch.
+
+## Quota/history lifecycle
+
+Management is opt-in through a distinct key. Enabling it starts one bounded polling
+worker and the login service. HTTP status reads cached, durable observations; it never
+performs quota network calls synchronously. Quota failures cannot prevent ordinary
+inference or cause fabricated available capacity.
+
+Observations are attributed to the credentials that fetched them, including a response
+arriving after an account switch. Each hashed journal verifies record identity (workspace plus reported user identity),
+uses private files and a lifetime lock, syncs appends, and compacts retained samples by
+atomic replacement. Files are bounded to 16 MiB and configured sample count; records
+to 64 KiB. Startup discards only an incomplete final line; complete malformed records
+fail closed. Pagination filters the retained snapshots before sorting/counting.
+
+At most two account histories are cached. Older accounts remain on disk and can be
+reopened on an explicit switch back. Runtime shutdown cancels/joins polling and login,
+waits for independent bounded credential refresh, closes transports and releases locks.
+
+## Verification boundaries
+
+Unit/race tests cover fake-provider OAuth, state/PKCE, browser/manual callbacks, account
+replacement and failure preservation, old-request recovery isolation, persisted history,
+quota parsing and errors. A live read-only account test verifies the real usage endpoint.
+Real inference tests verify native Codex CLI and Bifrost behavior. Automated tests never
+perform a real browser login or hot-switch the installed account; that requires the
+administrator's interactive authorization.
+
+Bifrost dependencies live in a nested test-only module, not the production module.
+Provider references/specifications are retained under `docs/reference/`; ignored source
+checkouts under `reference-projects/` are not runtime dependencies.

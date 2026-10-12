@@ -12,3 +12,7 @@ mcp-auth.json
 *.auth.json
 .auth-*
 *.log
+*.jsonl
+*.lock
+.codex-proxy-*
+/state/
