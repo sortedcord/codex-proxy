@@ -1,6 +1,8 @@
 # Configuration
 
-Flags override environment defaults. `serve` is optional; bare flags still work.
+Flags override environment defaults, including invalid quota interval defaults.
+`serve` is optional; bare flags still work. Explicit auth/history paths do not require
+a resolvable home directory; missing defaults fail rather than becoming relative paths.
 
 | Flag | Environment | Default |
 | --- | --- | --- |
@@ -35,8 +37,12 @@ When enabled, history is scoped to workspace plus provider-reported user identit
 `usage-<sha256>.jsonl` files, mode
 `0600`, in a private `0700` directory. Existing overly permissive directories are
 rejected rather than silently changing permissions. Both retained sample count and
-16 MiB per-account file size bound retention. At most two journals are cached in
-memory; switching back reopens older retained journals from disk.
+16 MiB per-account file size bound retention. API-visible retention stays at the
+configured count; physical journals allow 25% superseded-record slack (at least one)
+between compactions. At byte pressure, compaction targets 80% of the cap; it may drop
+older observations to leave room for appends. At most two journals are cached in
+memory; switching back reopens older retained journals from disk. An unavailable
+active identity prevents third-journal eviction until identity can be established.
 
 Separate lock files are private and intentionally retained after exit. OS locks
 release on process termination; do not unlink a live lock file. The proxy also locks

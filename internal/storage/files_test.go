@@ -20,7 +20,7 @@ func TestAtomicPrivateFileAndLifetimeLock(t *testing.T) {
 		t.Fatal("replacement failed")
 	}
 	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0600 {
+	if info.Mode().Perm() != 0o600 {
 		t.Fatal("file is not private")
 	}
 	lock, err := Acquire(path + ".lock")
@@ -42,7 +42,7 @@ func TestStorageRejectsSymlinks(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "link")
 	target := filepath.Join(dir, "target")
-	if err := os.WriteFile(target, []byte("private"), 0600); err != nil {
+	if err := os.WriteFile(target, []byte("private"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path); err != nil {

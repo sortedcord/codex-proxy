@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,7 +16,6 @@ import (
 	"github.com/sortedcord/codex-proxy/internal/config"
 	"github.com/sortedcord/codex-proxy/internal/oauth"
 	"github.com/sortedcord/codex-proxy/internal/storage"
-	"path/filepath"
 )
 
 const completedSSE = "data: {\"type\":\"response.completed\",\"response\":" +
@@ -57,17 +57,29 @@ func requestProxy(p *proxy, method, path, body string) *httptest.ResponseRecorde
 
 func TestResponseRoutesAndCredentialBoundary(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/responses" || r.Method != http.MethodPost {
-			t.Errorf("upstream route = %s %s", r.Method, r.URL.Path)
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path=%q, want /responses", r.URL.Path)
 		}
-		if r.Header.Get("Authorization") == "Bearer local-secret" || r.Header.Get("Chatgpt-Account-Id") != "test-account" {
-			t.Error("credential boundary violated")
+		if r.Method != http.MethodPost {
+			t.Errorf("upstream method=%q, want POST", r.Method)
 		}
-		if r.Header.Get("Cookie") != "" || r.Header.Get("X-Secret") != "" {
-			t.Error("unsafe client headers forwarded")
+		if r.Header.Get("Authorization") == "Bearer local-secret" {
+			t.Error("inference key leaked upstream")
 		}
-		if r.Header.Get("X-Codex-Turn-State") != "turn-state" || r.Header.Get("Session_id") != "session-1" {
-			t.Error("session headers lost")
+		if r.Header.Get("Chatgpt-Account-Id") != "test-account" {
+			t.Error("client overrode the upstream account")
+		}
+		if r.Header.Get("Cookie") != "" {
+			t.Error("client cookie forwarded upstream")
+		}
+		if r.Header.Get("X-Secret") != "" {
+			t.Error("unallowlisted client header forwarded upstream")
+		}
+		if r.Header.Get("X-Codex-Turn-State") != "turn-state" {
+			t.Error("turn-state header lost")
+		}
+		if r.Header.Get("Session_id") != "session-1" {
+			t.Error("session affinity header lost")
 		}
 		if r.Header.Get("X-Codex-Routing-Hint") != "model=gpt-test;tier=priority" {
 			t.Error("routing hint not derived from payload")
@@ -76,8 +88,11 @@ func TestResponseRoutesAndCredentialBoundary(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&object); err != nil {
 			t.Error(err)
 		}
-		if string(object["stream"]) != "true" || string(object["store"]) != "false" {
-			t.Error("backend flags incorrect")
+		if string(object["stream"]) != "true" {
+			t.Error("backend stream=true flag missing")
+		}
+		if string(object["store"]) != "false" {
+			t.Error("backend store=false flag missing")
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("X-Codex-Turn-State", "next-state")
@@ -99,16 +114,17 @@ func TestResponseRoutesAndCredentialBoundary(t *testing.T) {
 		request.Header.Set("Session_id", "session-1")
 		response := httptest.NewRecorder()
 		p.ServeHTTP(response, request)
-		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "resp_1") {
-			t.Fatalf(
-				"%s: %d %s",
-				path,
-				response.Code,
-				response.Body.String(),
-			)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d, want 200", path, response.Code)
 		}
-		if response.Header().Get("X-Codex-Turn-State") != "next-state" || response.Header().Get("Set-Cookie") != "" {
-			t.Error("response header boundary violated")
+		if !strings.Contains(response.Body.String(), "resp_1") {
+			t.Fatalf("%s response identity missing", path)
+		}
+		if response.Header().Get("X-Codex-Turn-State") != "next-state" {
+			t.Error("upstream turn-state header lost")
+		}
+		if response.Header().Get("Set-Cookie") != "" {
+			t.Error("upstream cookie leaked downstream")
 		}
 	}
 }
@@ -203,8 +219,11 @@ func TestUpstreamErrorsAndCompactPassThrough(t *testing.T) {
 		"/v1/responses",
 		`{"model":"gpt-test","input":[]}`,
 	)
-	if response.Code != 429 || response.Header().Get("Retry-After") != "42" {
-		t.Fatalf("quota response lost: %d %s", response.Code, response.Body.String())
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("quota status=%d, want 429", response.Code)
+	}
+	if got := response.Header().Get("Retry-After"); got != "42" {
+		t.Fatalf("Retry-After=%q, want 42", got)
 	}
 	if !strings.Contains(response.Body.String(), "usage_limit_reached") {
 		t.Fatal("upstream error lost")
@@ -215,15 +234,21 @@ func TestUpstreamErrorsAndCompactPassThrough(t *testing.T) {
 		"/v1/responses/compact",
 		`{"model":"gpt-test","input":[]}`,
 	)
-	if response.Code != 200 || !strings.Contains(response.Body.String(), "opaque") {
-		t.Fatalf("compact response lost: %d %s", response.Code, response.Body.String())
+	if response.Code != http.StatusOK {
+		t.Fatalf("compact status=%d, want 200", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "opaque") {
+		t.Fatal("native compact output lost")
 	}
 }
 
 func TestModelCatalogFormats(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/models" || r.URL.Query().Get("client_version") == "" {
-			t.Error("model request missing version")
+		if r.URL.Path != "/models" {
+			t.Errorf("model discovery path=%q, want /models", r.URL.Path)
+		}
+		if r.URL.Query().Get("client_version") == "" {
+			t.Error("model request missing client version")
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Etag", `"catalog-1"`)
@@ -241,8 +266,11 @@ func TestModelCatalogFormats(t *testing.T) {
 		"/v1/models",
 		"",
 	)
-	if response.Code != 200 || !strings.Contains(response.Body.String(), `"id":"gpt-test"`) {
-		t.Fatal("OpenAI model format missing")
+	if response.Code != http.StatusOK {
+		t.Fatalf("OpenAI model status=%d, want 200", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), `"id":"gpt-test"`) {
+		t.Fatal("OpenAI model ID missing")
 	}
 	response = requestProxy(
 		p,
@@ -250,15 +278,21 @@ func TestModelCatalogFormats(t *testing.T) {
 		"/backend-api/codex/models?client_version=0.162.1",
 		"",
 	)
-	if response.Code != 200 || !strings.Contains(response.Body.String(), "context_window") {
+	if response.Code != http.StatusOK {
+		t.Fatalf("native catalog status=%d, want 200", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "context_window") {
 		t.Fatal("Codex model metadata lost")
 	}
 	request := httptest.NewRequest("GET", "/v1/models?client_version=0.162.1", nil)
 	request.Header.Set("If-None-Match", `"catalog-1"`)
 	response = httptest.NewRecorder()
 	p.ServeHTTP(response, request)
-	if response.Code != 304 || response.Body.Len() != 0 {
-		t.Fatal("conditional model request broken")
+	if response.Code != http.StatusNotModified {
+		t.Fatalf("conditional model status=%d, want 304", response.Code)
+	}
+	if response.Body.Len() != 0 {
+		t.Fatal("304 model response contained a body")
 	}
 }
 
@@ -293,14 +327,14 @@ func Test401RecoveryIsBounded(t *testing.T) {
 			if succeeds {
 				want = 200
 			}
-			expectedCalls := inferenceCalls.Load() == 2 && refreshCalls.Load() == 1
-			if response.Code != want || !expectedCalls {
-				t.Fatalf(
-					"recovery: status=%d, inference=%d, refresh=%d",
-					response.Code,
-					inferenceCalls.Load(),
-					refreshCalls.Load(),
-				)
+			if response.Code != want {
+				t.Fatalf("recovery status=%d, want %d", response.Code, want)
+			}
+			if got := inferenceCalls.Load(); got != 2 {
+				t.Fatalf("inference attempts=%d, want 2", got)
+			}
+			if got := refreshCalls.Load(); got != 1 {
+				t.Fatalf("refresh attempts=%d, want 1", got)
 			}
 		})
 	}
@@ -326,9 +360,14 @@ func TestRedirectCannotLeakCredentials(t *testing.T) {
 		"/v1/models",
 		"",
 	)
-	unsafeRedirect := leaked.Load() || response.Header().Get("Location") != ""
-	if response.Code != 307 || unsafeRedirect {
-		t.Fatal("credential-carrying redirect followed or exposed")
+	if response.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("redirect status=%d, want 307", response.Code)
+	}
+	if leaked.Load() {
+		t.Fatal("credential-carrying redirect followed")
+	}
+	if response.Header().Get("Location") != "" {
+		t.Fatal("upstream redirect location exposed downstream")
 	}
 }
 
@@ -360,8 +399,11 @@ func TestStreamingFlushAndDisconnectCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Header.Get("Content-Type") != "text/event-stream" || resp.Header.Get("X-Accel-Buffering") != "no" {
-		t.Error("streaming headers missing")
+	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("stream content type=%q, want text/event-stream", got)
+	}
+	if got := resp.Header.Get("X-Accel-Buffering"); got != "no" {
+		t.Errorf("stream buffering header=%q, want no", got)
 	}
 	buffer := make([]byte, 8)
 	if _, err := io.ReadFull(resp.Body, buffer); err != nil {
@@ -392,7 +434,10 @@ func TestUpstreamIdleTimeout(t *testing.T) {
 		"/v1/responses",
 		`{"model":"gpt-test","input":[]}`,
 	)
-	if response.Code != 502 || time.Since(start) > time.Second {
-		t.Fatal("idle upstream did not terminate promptly")
+	if response.Code != http.StatusBadGateway {
+		t.Fatalf("idle timeout status=%d, want 502", response.Code)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("idle upstream termination took %s, want at most 1s", elapsed)
 	}
 }

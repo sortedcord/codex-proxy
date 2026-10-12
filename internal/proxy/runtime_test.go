@@ -46,8 +46,10 @@ func runtimeForTest(t *testing.T, handler http.Handler) *Runtime {
 		context.Background(),
 		cfg,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		oauth.LoginOptions{AuthorizeURL: upstream.URL + "/authorize", TokenURL: upstream.URL + "/token",
-			CallbackAddresses: []string{"127.0.0.1:0"}},
+		oauth.LoginOptions{
+			AuthorizeURL: upstream.URL + "/authorize", TokenURL: upstream.URL + "/token",
+			CallbackAddresses: []string{"127.0.0.1:0"},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -172,8 +174,11 @@ func TestRuntimeManagementAuthenticationAndEmptyStartup(t *testing.T) {
 		"",
 		"",
 	)
-	if health.Code != 200 || !strings.Contains(health.Body.String(), `"credential_configured":false`) {
-		t.Fatal("empty startup health failed")
+	if health.Code != http.StatusOK {
+		t.Fatalf("empty startup health status=%d, want 200", health.Code)
+	}
+	if !strings.Contains(health.Body.String(), `"credential_configured":false`) {
+		t.Fatal("empty startup health incorrectly reported credentials")
 	}
 	for _, path := range []string{"/status/account", "/status/limit", "/status/usage", "/config/login"} {
 		response := managementRequest(
@@ -194,8 +199,11 @@ func TestRuntimeManagementAuthenticationAndEmptyStartup(t *testing.T) {
 		`{"model":"gpt-test","input":"test"}`,
 		"inference-test",
 	)
-	if response.Code != 503 || upstreamCalls.Load() != 0 {
-		t.Fatal("empty account contacted upstream")
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("empty account inference status=%d, want 503", response.Code)
+	}
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Fatalf("empty account contacted upstream %d times", got)
 	}
 	runtime.cfg.ManagementKey = ""
 	response = managementRequest(
@@ -218,8 +226,11 @@ func TestRuntimeLoginQuotaAndPersistentRestart(t *testing.T) {
 	}
 	leakedAccess := strings.Contains(response.Body.String(), "access_token")
 	leakedRefresh := strings.Contains(response.Body.String(), "dummy-refresh")
-	if leakedAccess || leakedRefresh {
-		t.Fatal("login exposed tokens")
+	if leakedAccess {
+		t.Fatal("login response exposed an access token field")
+	}
+	if leakedRefresh {
+		t.Fatal("login response exposed a refresh token")
 	}
 	awaitQuota(t, runtime, "account-a")
 	for _, path := range []string{"/status/account", "/status/limit", "/status/usage?pool=codex&window=primary&limit=1"} {
@@ -230,8 +241,11 @@ func TestRuntimeLoginQuotaAndPersistentRestart(t *testing.T) {
 			"",
 			"management-test",
 		)
-		if response.Code != 200 || !strings.Contains(response.Body.String(), "account-a") {
-			t.Fatalf("status failed for %s: %d", path, response.Code)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d, want 200", path, response.Code)
+		}
+		if !strings.Contains(response.Body.String(), "account-a") {
+			t.Fatalf("%s omitted the active account", path)
 		}
 		if response.Header().Get("Cache-Control") != "no-store" {
 			t.Error("management response could be cached")
@@ -251,8 +265,11 @@ func TestRuntimeLoginQuotaAndPersistentRestart(t *testing.T) {
 		t.Fatal("quota history did not survive restart")
 	}
 	file, err := os.Stat(cfg.AuthFile)
-	if err != nil || file.Mode().Perm() != 0600 {
-		t.Fatal("login credentials are not private")
+	if err != nil {
+		t.Fatalf("cannot inspect persisted credentials: %v", err)
+	}
+	if got := file.Mode().Perm(); got != 0o600 {
+		t.Fatalf("credential permissions=%o, want 600", got)
 	}
 }
 
@@ -324,8 +341,11 @@ func TestHotSwitchDoesNotReplayOldRequestUnderNewAccount(t *testing.T) {
 		"",
 		"management-test",
 	)
-	if strings.Contains(response.Body.String(), "account-a") || !strings.Contains(response.Body.String(), "account-b") {
-		t.Fatal("account histories were mixed")
+	if strings.Contains(response.Body.String(), "account-a") {
+		t.Fatal("prior account leaked into the active history")
+	}
+	if !strings.Contains(response.Body.String(), "account-b") {
+		t.Fatal("replacement account history missing")
 	}
 	response = managementRequest(
 		runtime,
@@ -345,7 +365,7 @@ func TestFailedHotSwitchPreparationKeepsExistingAccount(t *testing.T) {
 		t.Fatal("first login failed")
 	}
 	path := status.HistoryPath(runtime.cfg.HistoryDir, "account-b")
-	if err := os.WriteFile(path, []byte("corrupt-complete-record\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("corrupt-complete-record\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	response := testLogin(t, runtime, "account-b")
@@ -353,8 +373,11 @@ func TestFailedHotSwitchPreparationKeepsExistingAccount(t *testing.T) {
 		t.Fatalf("failed activation returned %d", response.Code)
 	}
 	identity, err := runtime.auth.Profile()
-	if err != nil || identity.AccountID != "account-a" {
-		t.Fatal("failed switch displaced the old account")
+	if err != nil {
+		t.Fatalf("active profile unavailable after failed switch: %v", err)
+	}
+	if identity.AccountID != "account-a" {
+		t.Fatalf("active account=%q after failed switch, want account-a", identity.AccountID)
 	}
 	response = managementRequest(
 		runtime,

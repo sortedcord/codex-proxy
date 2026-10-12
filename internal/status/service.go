@@ -3,6 +3,7 @@ package status
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -51,7 +52,7 @@ func NewService(ctx context.Context, options Options) (*Service, error) {
 	if err := storage.PrivateDir(options.Dir); err != nil {
 		return nil, err
 	}
-	lock, err := storage.Acquire(options.Dir + "/status.lock")
+	lock, err := storage.Acquire(filepath.Join(options.Dir, "status.lock"))
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +80,19 @@ func (s *Service) Prepare(accountID string) error {
 
 func (s *Service) history(accountID string) (*History, error) {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, errors.New("quota service is closed")
+	}
+	if history := s.histories[accountID]; history != nil {
+		s.mu.Unlock()
+		return history, nil
+	}
+	s.mu.Unlock()
+
+	// The account callback may wait for OAuth. Do not nest that lock inside mu.
+	active, accountErr := s.options.Account()
+	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, errors.New("quota service is closed")
@@ -86,25 +100,28 @@ func (s *Service) history(accountID string) (*History, error) {
 	if history := s.histories[accountID]; history != nil {
 		return history, nil
 	}
-	// Retain at most two accounts in memory. Old journals remain on disk and can
-	// be reopened on a later login; never evict the currently active account.
+	if len(s.histories) >= 2 && (accountErr != nil || active.Scope() == "") {
+		// Fail closed rather than guessing which account is safe to evict.
+		return nil, errors.New("cannot evict quota history while the active account is unavailable")
+	}
+	history, err := OpenHistory(s.options.Dir, accountID, s.options.MaxSamples)
+	if err != nil {
+		return nil, err
+	}
+	// Prepare the candidate before eviction: a corrupt journal must not disturb
+	// the old cache. Keep at most two successfully opened journals.
 	if len(s.histories) >= 2 {
-		active, _ := s.options.Account()
-		for id, history := range s.histories {
+		for id, old := range s.histories {
 			if id == active.Scope() {
 				continue
 			}
-			if err := history.Close(); err != nil {
-				return nil, err
+			if err := old.Close(); err != nil {
+				return nil, errors.Join(err, history.Close())
 			}
 			delete(s.histories, id)
 			delete(s.polling, id)
 			break
 		}
-	}
-	history, err := OpenHistory(s.options.Dir, accountID, s.options.MaxSamples)
-	if err != nil {
-		return nil, err
 	}
 	s.histories[accountID] = history
 	return history, nil

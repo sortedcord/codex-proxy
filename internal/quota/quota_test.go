@@ -26,21 +26,48 @@ func TestQuotaNativeWindowsAndFamilies(t *testing.T) {
 		t.Fatal(err)
 	}
 	primary := snapshot.Pools["codex"].Primary
-	if primary.RemainingPercent != 87.5 || primary.WindowSeconds != 18000 {
-		t.Fatal("primary window was changed")
+	if primary == nil {
+		t.Fatal("primary window missing")
 	}
-	if primary.ResetAt == nil || !primary.ResetAt.Equal(now.Add(600*time.Second)) {
-		t.Fatal("reset was lost")
+	if primary.RemainingPercent != 87.5 {
+		t.Fatalf("remaining percentage=%v, want 87.5", primary.RemainingPercent)
+	}
+	if primary.WindowSeconds != 18000 {
+		t.Fatalf("window duration=%d, want 18000", primary.WindowSeconds)
+	}
+	if primary.ResetAt == nil {
+		t.Fatal("primary reset timestamp missing")
+	}
+	if want := now.Add(600 * time.Second); !primary.ResetAt.Equal(want) {
+		t.Fatalf("reset timestamp=%s, want %s", primary.ResetAt, want)
 	}
 	if snapshot.Pools["codex"].Secondary != nil {
 		t.Fatal("missing weekly quota was fabricated")
 	}
 	extra := snapshot.Pools["codex_spark"]
-	if extra.Secondary.RemainingPercent != 0 || *extra.Allowed {
-		t.Fatal("additional quota family was lost")
+	if extra.Secondary == nil {
+		t.Fatal("additional secondary window missing")
 	}
-	if snapshot.PlanType != "plus" || snapshot.Credits == nil || *snapshot.Credits.HasCredits {
-		t.Fatal("plan/credits were lost")
+	if extra.Secondary.RemainingPercent != 0 {
+		t.Fatalf("additional remaining percentage=%v, want 0", extra.Secondary.RemainingPercent)
+	}
+	if extra.Allowed == nil {
+		t.Fatal("additional allowed flag missing")
+	}
+	if *extra.Allowed {
+		t.Fatal("exhausted additional family reported as allowed")
+	}
+	if snapshot.PlanType != "plus" {
+		t.Fatalf("plan=%q, want plus", snapshot.PlanType)
+	}
+	if snapshot.Credits == nil {
+		t.Fatal("credits metadata missing")
+	}
+	if snapshot.Credits.HasCredits == nil {
+		t.Fatal("has_credits flag missing")
+	}
+	if *snapshot.Credits.HasCredits {
+		t.Fatal("account incorrectly reported available credits")
 	}
 }
 
@@ -76,8 +103,11 @@ func TestQuotaHTTPBoundaryAndSanitizedErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		correctToken := request.Header.Get("Authorization") == "Bearer dummy-access"
 		correctAccount := request.Header.Get("Chatgpt-Account-Id") == "test-account"
-		if !correctToken || !correctAccount {
-			t.Error("quota credential boundary failed")
+		if !correctToken {
+			t.Error("quota access token boundary failed")
+		}
+		if !correctAccount {
+			t.Error("quota account boundary failed")
 		}
 		_, _ = w.Write([]byte(sampleQuota))
 	}))
@@ -94,7 +124,10 @@ func TestQuotaHTTPBoundaryAndSanitizedErrors(t *testing.T) {
 	defer errorServer.Close()
 	fetcher.Endpoint = errorServer.URL
 	_, err := fetcher.Fetch(context.Background(), creds)
-	if err == nil || strings.Contains(err.Error(), "token-must-not-appear") {
+	if err == nil {
+		t.Fatal("rejected quota request returned no error")
+	}
+	if strings.Contains(err.Error(), "token-must-not-appear") {
 		t.Fatal("quota error exposed upstream body")
 	}
 }

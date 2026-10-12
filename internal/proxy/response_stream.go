@@ -1,28 +1,28 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 )
 
-// Frames are forwarded unchanged except for response metadata and omitted
-// terminal output. Deltas are never rebuilt. No goroutine or pipe is needed.
+// A native terminal event ends the stream immediately, after its rewritten bytes
+// have been delivered. No network read (or optional legacy [DONE]) is required.
 type responseStreamReader struct {
-	scanner  *bufio.Scanner
+	scanner  *sseScanner
 	metadata json.RawMessage
 	output   *responseOutput
 	pending  []byte
+	done     bool
 }
 
 func newResponseStreamReader(reader io.Reader, metadata json.RawMessage) *responseStreamReader {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), maxEventBytes)
-	scanner.Split(splitSSEFrame)
 	return &responseStreamReader{
-		scanner: scanner, metadata: metadata, output: newResponseOutput(), pending: []byte{},
+		scanner:  newSSEScanner(reader),
+		metadata: metadata,
+		output:   newResponseOutput(),
+		pending:  []byte{},
 	}
 }
 
@@ -31,71 +31,40 @@ func (r *responseStreamReader) Read(buffer []byte) (int, error) {
 		return 0, nil
 	}
 	for len(r.pending) == 0 {
-		if !r.scanner.Scan() {
-			if err := r.scanner.Err(); err != nil {
-				return 0, err
-			}
+		if r.done {
 			return 0, io.EOF
 		}
-		frame, err := r.frame(r.scanner.Bytes())
+		frame, err := r.scanner.next()
+		if errors.Is(err, io.EOF) {
+			return 0, io.ErrUnexpectedEOF
+		}
 		if err != nil {
 			return 0, err
 		}
-		r.pending = frame
+		r.pending, err = r.frame(frame)
+		if err != nil {
+			return 0, err
+		}
 	}
 	n := copy(buffer, r.pending)
 	r.pending = r.pending[n:]
 	return n, nil
 }
 
-func splitSSEFrame(data []byte, atEOF bool) (int, []byte, error) {
-	var start int
-	for start < len(data) {
-		index := bytes.IndexByte(data[start:], '\n')
-		if index < 0 {
-			break
-		}
-		end := start + index
-		if len(bytes.TrimSuffix(data[start:end], []byte("\r"))) == 0 {
-			return end + 1, data[:end+1], nil
-		}
-		start = end + 1
+func (r *responseStreamReader) frame(frame sseFrame) ([]byte, error) {
+	if len(frame.data) == 0 {
+		return bytes.Clone(frame.raw), nil
 	}
-	if atEOF && len(data) > 0 {
-		return len(data), data, nil
-	}
-	return 0, nil, nil
-}
-
-func (r *responseStreamReader) frame(frame []byte) ([]byte, error) {
-	lines := bytes.Split(frame, []byte("\n"))
-	payload := []byte{}
-	for _, line := range lines {
-		line = bytes.TrimSuffix(line, []byte("\r"))
-		line = bytes.TrimPrefix(line, []byte("\xef\xbb\xbf"))
-		if !bytes.HasPrefix(line, []byte("data:")) {
-			continue
-		}
-		value := bytes.TrimPrefix(bytes.TrimPrefix(line, []byte("data:")), []byte(" "))
-		payload = append(payload, value...)
-		payload = append(payload, '\n')
-	}
-	payload = bytes.TrimSuffix(payload, []byte("\n"))
-	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
-		return bytes.Clone(frame), nil
-	}
-	if len(r.metadata) == 0 && !bytes.Contains(payload, []byte(`"response"`)) &&
-		!bytes.Contains(payload, []byte(`"response.output_item.done"`)) {
-		return bytes.Clone(frame), nil
+	// [DONE] alone is not a native Responses terminal response.
+	if bytes.Equal(frame.data, []byte("[DONE]")) {
+		return nil, io.ErrUnexpectedEOF
 	}
 	event := map[string]json.RawMessage{}
-	if err := json.Unmarshal(payload, &event); err != nil || event == nil {
+	if err := json.Unmarshal(frame.data, &event); err != nil || event == nil {
 		return nil, errors.New("invalid JSON in upstream event stream")
 	}
-	response := event["response"]
-	var err error
-	switch jsonString(event["type"]) {
-	case "response.output_item.done":
+	eventType := jsonString(event["type"])
+	if eventType == "response.output_item.done" {
 		var index int
 		if raw := event["output_index"]; len(raw) > 0 {
 			if err := json.Unmarshal(raw, &index); err != nil {
@@ -105,40 +74,55 @@ func (r *responseStreamReader) frame(frame []byte) ([]byte, error) {
 		if err := r.output.add(index, event["item"]); err != nil {
 			return nil, err
 		}
-	case "response.completed", "response.done", "response.incomplete", "response.failed":
+	}
+	terminal := isTerminalEventType(eventType)
+	if eventType == "error" {
+		r.done = true
+		return bytes.Clone(frame.raw), nil
+	}
+	response := event["response"]
+	var err error
+	if terminal {
 		response, err = r.output.complete(response)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if len(response) == 0 || bytes.Equal(response, []byte("null")) {
-		return bytes.Clone(frame), nil
-	}
-	if len(r.metadata) > 0 {
+	if !isNull(response) && len(r.metadata) > 0 {
 		response, err = responseMetadata(response, r.metadata)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if bytes.Equal(response, event["response"]) {
-		return bytes.Clone(frame), nil
+	if isNull(response) || bytes.Equal(response, event["response"]) {
+		r.done = terminal
+		return bytes.Clone(frame.raw), nil
 	}
 	event["response"] = response
 	encoded, err := json.Marshal(event)
 	if err != nil {
 		return nil, errors.New("cannot encode upstream response event")
 	}
-	if len(encoded) > maxEventBytes {
-		return nil, errors.New("upstream SSE event exceeds size limit")
+	result := replaceSSEData(frame.raw, encoded)
+	if len(result) > maxEventBytes {
+		return nil, errors.New("upstream SSE frame exceeds size limit")
 	}
-	// Retain event/id/retry fields, comments, and CRLF framing. Replace only the
-	// data field(s); SSE permits multiline JSON to become a single data line.
+	r.done = terminal
+	return result, nil
+}
+
+// Retain event/id/retry fields, comments and CRLF; replace only data fields.
+func replaceSSEData(frame, encoded []byte) []byte {
+	lines := bytes.Split(frame, []byte("\n"))
 	result := []byte{}
 	written := false
 	for index, line := range lines {
 		if bytes.HasPrefix(bytes.TrimPrefix(line, []byte("\xef\xbb\xbf")), []byte("data:")) {
 			if written {
 				continue
+			}
+			if bytes.HasPrefix(line, []byte("\xef\xbb\xbf")) {
+				result = append(result, "\xef\xbb\xbf"...)
 			}
 			result = append(result, "data: "...)
 			result = append(result, encoded...)
@@ -153,7 +137,7 @@ func (r *responseStreamReader) frame(frame []byte) ([]byte, error) {
 			result = append(result, '\n')
 		}
 	}
-	return result, nil
+	return result
 }
 
 func responseMetadata(raw []byte, metadata json.RawMessage) ([]byte, error) {

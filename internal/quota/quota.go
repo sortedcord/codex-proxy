@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
+	"github.com/sortedcord/codex-proxy/internal/httputil"
 	"github.com/sortedcord/codex-proxy/internal/oauth"
 )
 
@@ -48,10 +48,7 @@ type Snapshot struct {
 }
 
 func (s Snapshot) Scope() string {
-	if s.IdentityKey != "" {
-		return s.IdentityKey
-	}
-	return s.AccountID
+	return oauth.AccountScope(s.AccountID, s.IdentityKey)
 }
 
 type Fetcher struct {
@@ -81,12 +78,12 @@ func (f *Fetcher) Fetch(ctx context.Context, creds oauth.Credentials) (Snapshot,
 	if err != nil {
 		return Snapshot{}, errors.New("quota upstream transport failure")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return Snapshot{}, fmt.Errorf("quota upstream returned HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err != nil || len(body) > maxResponseBytes {
+	body, err := httputil.ReadBounded(resp.Body, maxResponseBytes)
+	if err != nil {
 		return Snapshot{}, errors.New("cannot read bounded quota response")
 	}
 	snapshot, err := Parse(body, creds.AccountID, time.Now().UTC())

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"slices"
 	"strings"
+
+	"github.com/sortedcord/codex-proxy/internal/oauth"
 )
 
 type preparedRequest struct {
@@ -14,6 +16,101 @@ type preparedRequest struct {
 	model    string
 	tier     string
 	metadata json.RawMessage
+	creds    oauth.Credentials
+}
+
+func isNull(raw []byte) bool {
+	return len(raw) == 0 || bytes.Equal(raw, []byte("null"))
+}
+
+var unsupportedBackendFields = [...]string{
+	"max_output_tokens", "max_completion_tokens", "temperature", "top_p", "truncation",
+	"prompt_cache_options", "prompt_cache_retention", "user", "context_management",
+}
+
+func validateUnsupportedFeatures(object map[string]json.RawMessage) error {
+	if raw := object["previous_response_id"]; !isNull(raw) {
+		return errors.New("previous_response_id is unsupported over HTTP; send full input history")
+	}
+	delete(object, "previous_response_id")
+
+	if raw, ok := object["background"]; ok {
+		var background bool
+		if json.Unmarshal(raw, &background) != nil || background {
+			return errors.New("background responses are unsupported")
+		}
+		delete(object, "background")
+	}
+
+	for _, field := range [...]string{"conversation", "prompt"} {
+		if raw := object[field]; !isNull(raw) {
+			return errors.New(field + " references are unsupported; send full input history and instructions")
+		}
+		delete(object, field)
+	}
+	return nil
+}
+
+func extractMetadata(object map[string]json.RawMessage) (json.RawMessage, error) {
+	raw, ok := object["metadata"]
+	if !ok || isNull(raw) {
+		delete(object, "metadata")
+		return nil, nil
+	}
+	metadata := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &metadata); err != nil || metadata == nil {
+		return nil, errors.New("metadata must be an object")
+	}
+	// Metadata is client-side bookkeeping, not a Codex backend parameter.
+	delete(object, "metadata")
+	return bytes.Clone(raw), nil
+}
+
+func normalizeStreamOptions(object map[string]json.RawMessage) error {
+	raw, ok := object["stream_options"]
+	if !ok || isNull(raw) {
+		return nil
+	}
+	options := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &options); err != nil || options == nil {
+		return errors.New("stream_options must be an object")
+	}
+	// Bifrost's documented include_usage hint is not a Codex parameter.
+	// Usage already arrives in every native terminal response.
+	delete(options, "include_usage")
+	if len(options) == 0 {
+		delete(object, "stream_options")
+	} else {
+		setJSON(object, "stream_options", options)
+	}
+	return nil
+}
+
+func applyBackendDefaults(object map[string]json.RawMessage, compact bool) error {
+	for _, field := range unsupportedBackendFields {
+		delete(object, field)
+	}
+	if compact {
+		delete(object, "stream")
+		delete(object, "store")
+		return nil
+	}
+	setJSON(object, "stream", true)
+	setJSON(object, "store", false)
+	if _, ok := object["parallel_tool_calls"]; !ok {
+		setJSON(object, "parallel_tool_calls", true)
+	}
+	includes := []string{}
+	if raw, ok := object["include"]; ok {
+		if err := json.Unmarshal(raw, &includes); err != nil {
+			return errors.New("include must be an array of strings")
+		}
+	}
+	if !slices.Contains(includes, "reasoning.encrypted_content") {
+		includes = append(includes, "reasoning.encrypted_content")
+	}
+	setJSON(object, "include", includes)
+	return nil
 }
 
 func prepareRequest(body []byte, compact bool) (preparedRequest, error) {
@@ -34,45 +131,16 @@ func prepareRequest(body []byte, compact bool) (preparedRequest, error) {
 	if compact && prepared.stream {
 		return prepared, errors.New("compaction does not support streaming")
 	}
-	if raw := object["previous_response_id"]; len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
-		return prepared, errors.New("previous_response_id is unsupported over HTTP; send full input history")
+	if err := validateUnsupportedFeatures(object); err != nil {
+		return prepared, err
 	}
-	if raw, ok := object["background"]; ok {
-		var background bool
-		if json.Unmarshal(raw, &background) != nil || background {
-			return prepared, errors.New("background responses are unsupported")
-		}
+	var err error
+	prepared.metadata, err = extractMetadata(object)
+	if err != nil {
+		return prepared, err
 	}
-	delete(object, "previous_response_id")
-	delete(object, "background")
-	for _, field := range []string{"conversation", "prompt"} {
-		if raw := object[field]; len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
-			return prepared, errors.New(field + " references are unsupported; send full input history and instructions")
-		}
-		delete(object, field)
-	}
-	if raw, ok := object["metadata"]; ok && !bytes.Equal(raw, []byte("null")) {
-		metadata := map[string]json.RawMessage{}
-		if err := json.Unmarshal(raw, &metadata); err != nil || metadata == nil {
-			return prepared, errors.New("metadata must be an object")
-		}
-		prepared.metadata = bytes.Clone(raw)
-	}
-	// Metadata is client-side bookkeeping, not a Codex backend parameter.
-	delete(object, "metadata")
-	if raw, ok := object["stream_options"]; ok && !bytes.Equal(raw, []byte("null")) {
-		options := map[string]json.RawMessage{}
-		if err := json.Unmarshal(raw, &options); err != nil || options == nil {
-			return prepared, errors.New("stream_options must be an object")
-		}
-		// Bifrost's documented include_usage hint is not a Codex parameter.
-		// Usage already arrives in every native terminal response.
-		delete(options, "include_usage")
-		if len(options) == 0 {
-			delete(object, "stream_options")
-		} else {
-			setJSON(object, "stream_options", options)
-		}
+	if err := normalizeStreamOptions(object); err != nil {
+		return prepared, err
 	}
 
 	input, err := normalizeInput(object["input"])
@@ -80,7 +148,7 @@ func prepareRequest(body []byte, compact bool) (preparedRequest, error) {
 		return prepared, err
 	}
 	object["input"] = input
-	if raw, ok := object["instructions"]; !ok || bytes.Equal(raw, []byte("null")) {
+	if raw, ok := object["instructions"]; !ok || isNull(raw) {
 		setJSON(object, "instructions", "")
 	} else {
 		var instructions string
@@ -89,39 +157,14 @@ func prepareRequest(body []byte, compact bool) (preparedRequest, error) {
 		}
 	}
 
-	// Codex's subscription backend is not the general-purpose OpenAI API.
-	for _, field := range []string{
-		"max_output_tokens", "max_completion_tokens", "temperature", "top_p", "truncation",
-		"prompt_cache_options", "prompt_cache_retention", "user", "context_management",
-	} {
-		delete(object, field)
-	}
 	prepared.tier = jsonString(object["service_tier"])
 	if prepared.tier == "fast" {
 		prepared.tier = "priority"
 		setJSON(object, "service_tier", prepared.tier)
 	}
-	if compact {
-		delete(object, "stream")
-		delete(object, "store")
-		prepared.body, err = json.Marshal(object)
+	if err := applyBackendDefaults(object, compact); err != nil {
 		return prepared, err
 	}
-	setJSON(object, "stream", true)
-	setJSON(object, "store", false)
-	if _, ok := object["parallel_tool_calls"]; !ok {
-		setJSON(object, "parallel_tool_calls", true)
-	}
-	includes := []string{}
-	if raw, ok := object["include"]; ok {
-		if err := json.Unmarshal(raw, &includes); err != nil {
-			return prepared, errors.New("include must be an array of strings")
-		}
-	}
-	if !slices.Contains(includes, "reasoning.encrypted_content") {
-		includes = append(includes, "reasoning.encrypted_content")
-	}
-	setJSON(object, "include", includes)
 	prepared.body, err = json.Marshal(object)
 	return prepared, err
 }

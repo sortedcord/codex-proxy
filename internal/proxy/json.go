@@ -2,27 +2,25 @@ package proxy
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
+
+	"github.com/sortedcord/codex-proxy/internal/httputil"
+)
+
+const (
+	maxRequestBytes = httputil.MaxRequestBytes
+	maxEventBytes   = httputil.MaxEventBytes
+	maxJSONBytes    = httputil.MaxJSONBytes
 )
 
 func readBounded(reader io.Reader, limit int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, errors.New("body exceeds size limit")
-	}
-	return body, nil
+	return httputil.ReadBounded(reader, limit)
 }
 
 func jsonString(raw json.RawMessage) string {
-	var value string
-	_ = json.Unmarshal(raw, &value)
-	return value
+	return httputil.JSONString(raw)
 }
 
 func setJSON(object map[string]json.RawMessage, key string, value any) {
-	object[key], _ = json.Marshal(value)
+	httputil.SetJSON(object, key, value)
 }

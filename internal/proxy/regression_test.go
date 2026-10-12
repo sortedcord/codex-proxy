@@ -1,12 +1,16 @@
 package proxy
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMissingUpstreamContentType(t *testing.T) {
@@ -48,14 +52,20 @@ func TestCollectedInBandErrorsPreserveDetails(t *testing.T) {
 		"/v1/responses",
 		`{"model":"gpt-test","input":[]}`,
 	)
-	if response.Code != 429 || !strings.Contains(response.Body.String(), "usage_limit_reached") {
-		t.Fatal("collected error code/status lost")
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("collected quota error status=%d, want 429", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "usage_limit_reached") {
+		t.Fatal("collected quota error code lost")
 	}
 	for _, code := range []string{"server_is_overloaded", "unexpected_error"} {
 		event := []byte(`{"type":"error","code":"` + code + `","message":"details"}`)
 		err := newStreamError(event)
-		if !json.Valid(err.body) || strings.Contains(err.Error(), "details") {
-			t.Fatal("invalid error body or unsafe log message")
+		if !json.Valid(err.body) {
+			t.Fatal("invalid collected error JSON")
+		}
+		if strings.Contains(err.Error(), "details") {
+			t.Fatal("error log message exposed upstream details")
 		}
 		if code == "server_is_overloaded" && err.status != 503 {
 			t.Fatal("overload did not map to 503")
@@ -102,10 +112,105 @@ func TestCacheBreakpointsAndInvalidArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := string(prepared.body)
-	if strings.Contains(body, "prompt_cache_breakpoint") || !strings.Contains(body, `"leave":"unchanged"`) {
-		t.Fatal("cache hints retained or non-string arguments silently rewritten")
+	if strings.Contains(body, "prompt_cache_breakpoint") {
+		t.Fatal("cache hints were retained")
+	}
+	if !strings.Contains(body, `"leave":"unchanged"`) {
+		t.Fatal("non-string arguments were silently rewritten")
 	}
 	if !strings.Contains(body, `"arguments":"{}"`) {
 		t.Fatal("blank arguments were not repaired")
+	}
+}
+
+func TestStreamingEOFRequiresTerminalEvent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\"}\n\n")
+	}))
+	defer upstream.Close()
+	server := httptest.NewServer(testProxy(t, upstream))
+	defer server.Close()
+	resp, err := http.Post(
+		server.URL+"/v1/responses",
+		"application/json",
+		strings.NewReader(`{"model":"gpt-test","input":[],"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err == nil {
+		t.Fatalf("truncated stream ended cleanly without terminal event: HTTP %d, body %q", resp.StatusCode, body)
+	}
+}
+
+func TestStreamingStopsAfterTerminalEvent(t *testing.T) {
+	start := time.Now()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, completedSSE)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	p := testProxy(t, upstream)
+	p.cfg.IdleTimeout = 10 * time.Second
+	server := httptest.NewServer(p)
+	defer server.Close()
+	resp, err := http.Post(
+		server.URL+"/v1/responses",
+		"application/json",
+		strings.NewReader(`{"model":"gpt-test","input":[],"stream":true}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("completed stream failed after terminal event: %v; body %q", err, body)
+	}
+	if !strings.Contains(string(body), "response.completed") {
+		t.Fatalf("missing completed event in body: %q", string(body))
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("terminal event waited for idle timeout: elapsed %s", elapsed)
+	}
+}
+
+func TestEarlyRejectionOfUnreadBodies(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+	defer upstream.Close()
+	p := testProxy(t, upstream)
+	p.cfg.APIKey = "required-key"
+	server := httptest.NewUnstartedServer(p)
+	server.Config.ReadTimeout = 2 * time.Second
+	server.Start()
+	defer server.Close()
+
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = fmt.Fprintf(
+		conn,
+		"POST /v1/responses HTTP/1.1\r\nHost: test\r\nContent-Length: 100\r\n\r\n",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("early rejection waited for unauthenticated body: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 }

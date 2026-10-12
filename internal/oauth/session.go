@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sortedcord/codex-proxy/internal/config"
+	"github.com/sortedcord/codex-proxy/internal/httputil"
 )
 
 var (
@@ -106,6 +107,37 @@ func randomString() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes[:]), nil
 }
 
+func bindCallbackListener(addresses []string) (net.Listener, error) {
+	for _, address := range addresses {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil || host != "127.0.0.1" {
+			return nil, errors.New("callback must bind IPv4 loopback")
+		}
+		listener, err := net.Listen("tcp4", address)
+		if err == nil {
+			return listener, nil
+		}
+	}
+	return nil, errors.New("OAuth callback ports are unavailable")
+}
+
+func buildAuthorizeURL(authorizeURL, redirectURI, state, verifier string) string {
+	challenge := sha256.Sum256([]byte(verifier))
+	parameters := url.Values{
+		"response_type":              {"code"},
+		"client_id":                  {ClientID},
+		"redirect_uri":               {redirectURI},
+		"scope":                      {"openid profile email offline_access api.connectors.read api.connectors.invoke"},
+		"state":                      {state},
+		"code_challenge":             {base64.RawURLEncoding.EncodeToString(challenge[:])},
+		"code_challenge_method":      {"S256"},
+		"id_token_add_organizations": {"true"},
+		"codex_cli_simplified_flow":  {"true"},
+		"originator":                 {"codex_cli_rs"},
+	}
+	return authorizeURL + "?" + parameters.Encode()
+}
+
 func (m *SessionManager) Begin(ctx context.Context) (LoginInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -132,39 +164,31 @@ func (m *SessionManager) Begin(ctx context.Context) (LoginInfo, error) {
 	if err != nil {
 		return LoginInfo{}, err
 	}
-	var listener net.Listener
-	for _, address := range m.options.CallbackAddresses {
-		host, _, err := net.SplitHostPort(address)
-		if err != nil || host != "127.0.0.1" {
-			return LoginInfo{}, errors.New("callback must bind IPv4 loopback")
-		}
-		listener, err = net.Listen("tcp4", address)
-		if err == nil {
-			break
-		}
-	}
-	if listener == nil {
-		return LoginInfo{}, errors.New("OAuth callback ports are unavailable")
+	listener, err := bindCallbackListener(m.options.CallbackAddresses)
+	if err != nil {
+		return LoginInfo{}, err
 	}
 	redirectURI := "http://" + listener.Addr().String() + "/auth/callback"
-	challenge := sha256.Sum256([]byte(verifier))
-	parameters := url.Values{
-		"response_type": {"code"}, "client_id": {ClientID}, "redirect_uri": {redirectURI},
-		"scope": {"openid profile email offline_access api.connectors.read api.connectors.invoke"},
-		"state": {state}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])},
-		"code_challenge_method": {"S256"}, "id_token_add_organizations": {"true"},
-		"codex_cli_simplified_flow": {"true"}, "originator": {"codex_cli_rs"},
-	}
 	session := &loginSession{
-		state: state, verifier: verifier, redirectURI: redirectURI, listener: listener,
-		info: LoginInfo{LoginURL: m.options.AuthorizeURL + "?" + parameters.Encode(),
-			ExpiresAt: time.Now().UTC().Add(m.options.Lifetime), Status: "pending"},
+		state:       state,
+		verifier:    verifier,
+		redirectURI: redirectURI,
+		listener:    listener,
+		info: LoginInfo{
+			LoginURL:  buildAuthorizeURL(m.options.AuthorizeURL, redirectURI, state, verifier),
+			ExpiresAt: time.Now().UTC().Add(m.options.Lifetime),
+			Status:    "pending",
+		},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) { m.callback(session, w, r) })
 	session.server = &http.Server{
-		Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second,
-		WriteTimeout: 35 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 8 << 10,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      35 * time.Second,
+		IdleTimeout:       5 * time.Second,
+		MaxHeaderBytes:    8 << 10,
 	}
 	session.server.SetKeepAlivesEnabled(false)
 	m.active = session
@@ -191,44 +215,45 @@ func (m *SessionManager) cleanup(session *loginSession) {
 	}
 }
 
-func (m *SessionManager) Complete(ctx context.Context, code, state string) (Profile, error) {
+func (m *SessionManager) claimSession(ctx context.Context, code, state string) (*loginSession, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.closed || m.ctx.Err() != nil {
-		m.mu.Unlock()
-		return Profile{}, ErrSessionClosed
+		return nil, ErrSessionClosed
 	}
 	if err := ctx.Err(); err != nil {
-		m.mu.Unlock()
-		return Profile{}, err
+		return nil, err
 	}
 	session := m.active
 	if session == nil || subtle.ConstantTimeCompare([]byte(session.state), []byte(state)) != 1 {
-		m.mu.Unlock()
-		return Profile{}, ErrInvalidState
+		return nil, ErrInvalidState
 	}
 	if session.info.Status == "exchanging" {
-		m.mu.Unlock()
-		return Profile{}, ErrLoginInProgress
+		return nil, ErrLoginInProgress
 	}
 	expired := session.info.Status == "expired" || time.Now().After(session.info.ExpiresAt)
 	if expired {
 		session.info.Status = "expired"
 		m.cleanup(session)
-		m.mu.Unlock()
-		return Profile{}, ErrSessionExpired
+		return nil, ErrSessionExpired
 	}
 	if session.info.Status != "pending" {
-		m.mu.Unlock()
-		return Profile{}, ErrSessionUsed
+		return nil, ErrSessionUsed
 	}
 	if code == "" || len(code) > 8192 {
-		m.mu.Unlock()
-		return Profile{}, ErrInvalidState
+		return nil, ErrInvalidState
 	}
 	session.info.Status = "exchanging"
 	m.cleanup(session)
 	m.work.Add(1)
-	m.mu.Unlock()
+	return session, nil
+}
+
+func (m *SessionManager) Complete(ctx context.Context, code, state string) (Profile, error) {
+	session, err := m.claimSession(ctx, code, state)
+	if err != nil {
+		return Profile{}, err
+	}
 	defer m.work.Done()
 	// Once a one-time code is posted, client disconnects must not abandon a
 	// successful exchange/save. Shutdown still cancels and joins this bounded work.
@@ -271,12 +296,12 @@ func (m *SessionManager) exchange(ctx context.Context, session *loginSession, co
 	if err != nil {
 		return Tokens{}, errors.New("OAuth token exchange failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return Tokens{}, fmt.Errorf("OAuth token exchange returned HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if err != nil || len(body) > 1<<20 {
+	body, err := httputil.ReadBounded(resp.Body, 1<<20)
+	if err != nil {
 		return Tokens{}, errors.New("cannot read bounded OAuth token response")
 	}
 	tokens := Tokens{}

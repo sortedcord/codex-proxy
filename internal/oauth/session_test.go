@@ -55,8 +55,11 @@ func TestOAuthPKCEStateSingleUseAndManualCallback(t *testing.T) {
 		if base64.RawURLEncoding.EncodeToString(digest[:]) != challenge {
 			t.Error("PKCE challenge did not match verifier")
 		}
-		if request.Form.Get("grant_type") != "authorization_code" || request.Form.Get("client_id") != ClientID {
-			t.Error("authorization grant was changed")
+		if request.Form.Get("grant_type") != "authorization_code" {
+			t.Errorf("grant type=%q, want authorization_code", request.Form.Get("grant_type"))
+		}
+		if request.Form.Get("client_id") != ClientID {
+			t.Errorf("client ID=%q, want %q", request.Form.Get("client_id"), ClientID)
 		}
 		_ = json.NewEncoder(w).Encode(Tokens{
 			AccessToken: loginJWT("account-new"), IDToken: loginJWT("account-new"), RefreshToken: "dummy-refresh",
@@ -68,8 +71,11 @@ func TestOAuthPKCEStateSingleUseAndManualCallback(t *testing.T) {
 	}
 	parsed, _ := url.Parse(info.LoginURL)
 	challenge = parsed.Query().Get("code_challenge")
-	if parsed.Query().Get("code_challenge_method") != "S256" || len(parsed.Query().Get("state")) != 43 {
-		t.Fatal("authorization is not protected by PKCE and random state")
+	if method := parsed.Query().Get("code_challenge_method"); method != "S256" {
+		t.Fatalf("PKCE method=%q, want S256", method)
+	}
+	if size := len(parsed.Query().Get("state")); size != 43 {
+		t.Fatalf("OAuth state length=%d, want 43", size)
 	}
 	reused, _ := manager.Begin(context.Background())
 	if reused.LoginURL != info.LoginURL {
@@ -85,8 +91,11 @@ func TestOAuthPKCEStateSingleUseAndManualCallback(t *testing.T) {
 	}
 	callback := redirect + "?code=dummy-code&state=" + parsed.Query().Get("state")
 	identity, err := manager.CompleteURL(context.Background(), callback)
-	if err != nil || identity.AccountID != "account-new" {
-		t.Fatal("manual callback failed", err)
+	if err != nil {
+		t.Fatalf("manual callback failed: %v", err)
+	}
+	if identity.AccountID != "account-new" {
+		t.Fatalf("callback account=%q, want account-new", identity.AccountID)
 	}
 	_, replayError := manager.Complete(context.Background(), "code", parsed.Query().Get("state"))
 	if !errors.Is(replayError, ErrSessionUsed) {
@@ -163,7 +172,10 @@ func TestLoginReplacementIsAccountBoundAndFailureSafe(t *testing.T) {
 		t.Fatal("failed credential save was accepted")
 	}
 	identity, err := manager.Profile()
-	if err != nil || identity.AccountID != "account-b" {
-		t.Fatal("failed save displaced the active account")
+	if err != nil {
+		t.Fatalf("active profile unavailable after failed save: %v", err)
+	}
+	if identity.AccountID != "account-b" {
+		t.Fatalf("active account=%q after failed save, want account-b", identity.AccountID)
 	}
 }

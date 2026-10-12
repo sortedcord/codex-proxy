@@ -31,7 +31,10 @@ func TestSharedWorkspaceUsersHaveSeparateHistoryIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if alice.AccountID != bob.AccountID || alice.Scope() == bob.Scope() {
+	if alice.AccountID != bob.AccountID {
+		t.Fatal("test users must belong to the same workspace")
+	}
+	if alice.Scope() == bob.Scope() {
 		t.Fatal("shared workspace users were treated as one quota-history identity")
 	}
 }
@@ -69,11 +72,17 @@ func TestPostRenameDurabilityFailurePublishesDiskAccount(t *testing.T) {
 	tokens := Tokens{AccessToken: workspaceJWT("alice"), RefreshToken: "dummy"}
 	identity, err := manager.Replace(context.Background(), tokens)
 	var committed *storage.CommitError
-	if !errors.As(err, &committed) || !identity.CredentialConfigured {
-		t.Fatal("committed failure was hidden")
+	if !errors.As(err, &committed) {
+		t.Fatalf("replacement error=%v, want CommitError", err)
+	}
+	if !identity.CredentialConfigured {
+		t.Fatal("committed replacement was reported as unconfigured")
 	}
 	profile, err := manager.Profile()
-	if err != nil || profile.Scope() != identity.Scope() {
+	if err != nil {
+		t.Fatalf("committed profile unavailable: %v", err)
+	}
+	if profile.Scope() != identity.Scope() {
 		t.Fatal("live account did not follow the committed file")
 	}
 }

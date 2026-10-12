@@ -8,6 +8,9 @@ import (
 	"runtime"
 )
 
+// MaxHistorySamples bounds the logical per-account retention in config and storage.
+const MaxHistorySamples = 10000
+
 // CommitError means rename succeeded but directory durability could not be confirmed.
 // Callers must reflect the replacement in memory, not pretend the old file survived.
 type CommitError struct{ Err error }
@@ -30,7 +33,7 @@ func InspectFile(path string) error {
 }
 
 func PrivateDir(path string) error {
-	if err := os.MkdirAll(path, 0700); err != nil {
+	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}
 	info, err := os.Lstat(path)
@@ -40,7 +43,7 @@ func PrivateDir(path string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("storage directory must be a directory, not a symlink")
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return errors.New("storage directory must be private (chmod 700)")
 	}
 	return nil
@@ -54,9 +57,11 @@ func AtomicWrite(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(file.Name())
-	defer file.Close()
-	if err := file.Chmod(0600); err != nil {
+	defer func() { _ = os.Remove(file.Name()) }()
+	// The successful write path checks Close before rename; this only cleans
+	// up aborted writes or closes an already-closed descriptor.
+	defer func() { _ = file.Close() }()
+	if err := file.Chmod(0o600); err != nil {
 		return err
 	}
 	if _, err := file.Write(data); err != nil {
@@ -87,7 +92,7 @@ func Acquire(path string) (*Lock, error) {
 	if err := InspectFile(path); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}

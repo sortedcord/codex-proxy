@@ -16,6 +16,6 @@ func syncDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }() // Read-only descriptor; Sync's error is returned below.
 	return dir.Sync()
 }

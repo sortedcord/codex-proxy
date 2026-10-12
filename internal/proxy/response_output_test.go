@@ -31,8 +31,11 @@ func TestStreamingTerminalOutputReconstruction(t *testing.T) {
 		Output []json.RawMessage `json:"output"`
 	}{Output: []json.RawMessage{}}
 	_ = json.Unmarshal(response, &object)
-	if len(object.Output) != 2 || !bytes.Contains(object.Output[0], []byte("9007199254740993")) {
-		t.Fatal("streaming terminal output lost order, native fields, or precision")
+	if len(object.Output) != 2 {
+		t.Fatalf("terminal output count=%d, want 2", len(object.Output))
+	}
+	if !bytes.Contains(object.Output[0], []byte("9007199254740993")) {
+		t.Fatal("reasoning item lost order or numeric precision")
 	}
 	if !bytes.Contains(result, []byte(`"sequence_number":4`)) {
 		t.Fatal("terminal event sequence number changed")
@@ -60,7 +63,10 @@ func TestOutputStorageValidation(t *testing.T) {
 	_ = output.add(0, []byte(`{"type":"message","id":"should_not_replace"}`))
 	native := []byte(`{"output":[{"type":"message","id":"authoritative"}]}`)
 	completed, err := output.complete(native)
-	if err != nil || !bytes.Equal(completed, native) {
+	if err != nil {
+		t.Fatalf("native terminal output rejected: %v", err)
+	}
+	if !bytes.Equal(completed, native) {
 		t.Fatal("nonempty native terminal output was replaced")
 	}
 }

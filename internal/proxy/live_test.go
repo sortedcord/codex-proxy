@@ -78,8 +78,11 @@ func TestLiveProxy(t *testing.T) {
 		catalog := struct {
 			Data []json.RawMessage `json:"data"`
 		}{Data: []json.RawMessage{}}
-		if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil || len(catalog.Data) == 0 {
-			t.Fatal("live model catalog unavailable")
+		if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+			t.Fatal("live model catalog could not be decoded")
+		}
+		if len(catalog.Data) == 0 {
+			t.Fatal("live model catalog is empty")
 		}
 	})
 	for _, stream := range []bool{false, true} {
@@ -109,7 +112,10 @@ func TestLiveProxy(t *testing.T) {
 				}
 				return
 			}
-			if !json.Valid(result) || !bytes.Contains(result, []byte("PROXY_OK")) {
+			if !json.Valid(result) {
+				t.Fatal("live response is not valid JSON")
+			}
+			if !bytes.Contains(result, []byte("PROXY_OK")) {
 				t.Fatal("live response missing expected output")
 			}
 		})

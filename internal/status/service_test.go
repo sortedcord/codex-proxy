@@ -49,8 +49,11 @@ func TestServicePollingStalenessAndAccountIsolation(t *testing.T) {
 	service.TriggerPoll()
 	wait("account-a", true)
 	sample, _, info := service.Latest("account-a")
-	if !service.Stale(sample, info) || info.LastError == "private failure details" {
-		t.Fatal("failed quota observation was not safely marked stale")
+	if !service.Stale(sample, info) {
+		t.Fatal("failed quota observation was not marked stale")
+	}
+	if info.LastError == "private failure details" {
+		t.Fatal("polling status exposed private failure details")
 	}
 	failed.Store(false)
 	if err := service.Prepare("account-b"); err != nil {
@@ -60,7 +63,13 @@ func TestServicePollingStalenessAndAccountIsolation(t *testing.T) {
 	service.TriggerPoll()
 	wait("account-b", false)
 	result, err := service.Query("account-b", Query{Pool: "all", Window: "all", Order: "desc", Limit: 100})
-	if err != nil || len(result.Samples) != 1 || result.Samples[0].AccountID != "account-b" {
+	if err != nil {
+		t.Fatalf("history query failed: %v", err)
+	}
+	if len(result.Samples) != 1 {
+		t.Fatalf("active account sample count=%d, want 1", len(result.Samples))
+	}
+	if result.Samples[0].AccountID != "account-b" {
 		t.Fatal("history crossed account boundaries")
 	}
 	if err := service.Close(); err != nil {

@@ -4,44 +4,70 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/sortedcord/codex-proxy/internal/config"
 )
 
-func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	runtime, err := NewRuntime(ctx, cfg, logger)
+func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr error) {
+	if ctx == nil || logger == nil {
+		return errors.New("server requires a context and logger")
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return err
 	}
-	defer runtime.Close()
+	defer func() {
+		// Serve owns the listener once started; tolerate its prior close.
+		if err := ln.Close(); !errors.Is(err, net.ErrClosed) {
+			runErr = errors.Join(runErr, err)
+		}
+	}()
+	rt, err := NewRuntime(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
+	defer func() { runErr = errors.Join(runErr, rt.Close()) }()
+	return serve(ctx, ln, rt, logger)
+}
+
+func serve(ctx context.Context, ln net.Listener, handler http.Handler, logger *slog.Logger) error {
+	owned, cancel := context.WithCancel(ctx)
+	defer cancel()
 	server := &http.Server{
-		Addr: cfg.Addr, Handler: runtime, ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+		<-owned.Done()
+		shutdownCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			_ = server.Close()
 		}
 	}()
-	defer func() { cancel(); <-shutdownDone }()
-	logger.Info("listening", "addr", cfg.Addr)
-	err = server.ListenAndServe()
-	// A listen failure must also release the shutdown waiter.
-	if !errors.Is(err, http.ErrServerClosed) {
-		_ = server.Close()
-		return err
-	}
+	logger.Info("listening", "addr", ln.Addr().String())
+	err := server.Serve(ln)
+	// A permanent accept error must wake the shutdown worker before joining it.
+	cancel()
 	<-shutdownDone
-	return nil
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 func newHTTPClient() *http.Client {

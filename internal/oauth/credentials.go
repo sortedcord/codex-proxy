@@ -29,10 +29,16 @@ type Profile struct {
 // A ChatGPT workspace can contain multiple users. Histories bind both identities
 // when the provider reports a user ID; legacy opaque credentials fall back to account ID.
 func (p Profile) Scope() string {
-	if p.IdentityKey != "" {
-		return p.IdentityKey
+	return AccountScope(p.AccountID, p.IdentityKey)
+}
+
+// AccountScope uses the reported user/workspace identity when available, falling
+// back to the workspace ID for legacy opaque credentials.
+func AccountScope(accountID, identityKey string) string {
+	if identityKey != "" {
+		return identityKey
 	}
-	return p.AccountID
+	return accountID
 }
 
 // Tokens are accepted only from the trusted OAuth exchange, never from API input.
@@ -43,13 +49,20 @@ type Tokens struct {
 }
 
 func (a *Manager) Profile() (Profile, error) {
+	body, err := readAuthBody(a.path)
+	if err != nil {
+		return Profile{}, ErrUnavailable
+	}
+	if cached := a.published.Load(); cached != nil && cached.digest == sha256.Sum256(body) {
+		return cached.profile, nil
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	doc, err := a.load()
 	if err != nil {
 		return Profile{}, ErrUnavailable
 	}
-	return profile(doc.creds.AccountID, jsonString(doc.tokens["id_token"]), doc.creds.AccessToken), nil
+	return doc.profile, nil
 }
 
 func profile(accountID, idToken, accessToken string) Profile {
@@ -131,15 +144,18 @@ func (a *Manager) Replace(ctx context.Context, tokens Tokens) (Profile, error) {
 	if err := ctx.Err(); err != nil {
 		return Profile{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(a.path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(a.path), 0o700); err != nil {
 		return Profile{}, errors.New("cannot prepare credential directory")
 	}
 	body, err := json.MarshalIndent(map[string]any{
-		"auth_mode": "chatgpt", "OPENAI_API_KEY": nil,
-		"last_refresh": time.Now().UTC().Format(time.RFC3339),
+		"auth_mode":      "chatgpt",
+		"OPENAI_API_KEY": nil,
+		"last_refresh":   time.Now().UTC().Format(time.RFC3339),
 		"tokens": map[string]string{
-			"access_token": tokens.AccessToken, "refresh_token": tokens.RefreshToken,
-			"id_token": tokens.IDToken, "account_id": identity.AccountID,
+			"access_token":  tokens.AccessToken,
+			"refresh_token": tokens.RefreshToken,
+			"id_token":      tokens.IDToken,
+			"account_id":    identity.AccountID,
 		},
 	}, "", "  ")
 	if err != nil {
@@ -153,6 +169,7 @@ func (a *Manager) Replace(ctx context.Context, tokens Tokens) (Profile, error) {
 	a.accountID = identity.AccountID
 	a.identityKey = identity.Scope()
 	a.generation++
+	a.cacheValid = false
 	a.failedAccess, a.failedToken, a.refreshError = "", "", nil
 	return identity, err
 }

@@ -3,17 +3,20 @@ package oauth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/sortedcord/codex-proxy/internal/httputil"
 	"github.com/sortedcord/codex-proxy/internal/storage"
 )
 
@@ -31,12 +34,14 @@ type Credentials struct {
 	IdentityKey  string    `json:"-"`
 	Generation   uint64    `json:"-"`
 	LastRefresh  time.Time `json:"-"`
+	expiresAt    time.Time
 }
 
 type authDocument struct {
-	root   map[string]json.RawMessage
-	tokens map[string]json.RawMessage
-	creds  Credentials
+	root    map[string]json.RawMessage
+	tokens  map[string]json.RawMessage
+	creds   Credentials
+	profile Profile
 }
 
 type Manager struct {
@@ -51,6 +56,16 @@ type Manager struct {
 	failedAccess string
 	refreshError error
 	persist      func(string, []byte) error
+	cachedDoc    authDocument
+	cachedHash   [sha256.Size]byte
+	cacheValid   bool
+	published    atomic.Pointer[profileSnapshot]
+}
+
+// Non-secret immutable state lets cached status reads bypass an in-flight refresh.
+type profileSnapshot struct {
+	digest  [sha256.Size]byte
+	profile Profile
 }
 
 func NewManager(path string, client *http.Client, tokenURL string) (*Manager, error) {
@@ -67,7 +82,7 @@ func NewManager(path string, client *http.Client, tokenURL string) (*Manager, er
 	}, nil
 }
 
-func (a *Manager) current(ctx context.Context) (Credentials, error) {
+func (a *Manager) Current(ctx context.Context) (Credentials, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -87,14 +102,12 @@ func (a *Manager) current(ctx context.Context) (Credentials, error) {
 	return a.refresh(doc)
 }
 
-func (a *Manager) Current(ctx context.Context) (Credentials, error) { return a.current(ctx) }
-
 // Recovery must never replay an old request under a newly activated account.
 func (a *Manager) Recover(ctx context.Context, rejected Credentials) (Credentials, bool, error) {
-	return a.recover(ctx, rejected.AccessToken, rejected)
+	return a.recover(ctx, rejected.AccessToken, &rejected)
 }
 
-func (a *Manager) recover(ctx context.Context, rejected string, expected ...Credentials) (Credentials, bool, error) {
+func (a *Manager) recover(ctx context.Context, rejected string, expected *Credentials) (Credentials, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -104,9 +117,9 @@ func (a *Manager) recover(ctx context.Context, rejected string, expected ...Cred
 	if err != nil {
 		return Credentials{}, false, err
 	}
-	if len(expected) > 0 {
-		accountChanged := doc.creds.AccountID != expected[0].AccountID
-		loginChanged := doc.creds.Generation != expected[0].Generation
+	if expected != nil {
+		accountChanged := doc.creds.AccountID != expected.AccountID
+		loginChanged := doc.creds.Generation != expected.Generation
 		if accountChanged || loginChanged {
 			return Credentials{}, false, errors.New("login changed during request; request was not replayed")
 		}
@@ -120,25 +133,67 @@ func (a *Manager) recover(ctx context.Context, rejected string, expected ...Cred
 
 // Shutdown must not terminate an in-flight refresh after it rotates a token but
 // before the new credentials reach disk. New requests are stopped first.
-func (a *Manager) waitForRefresh() {
+func (a *Manager) WaitForRefresh() {
 	a.mu.Lock()
-	a.mu.Unlock()
+	a.mu.Unlock() //nolint:staticcheck // SA2001: locking joins the serialized refresh before shutdown.
 }
 
-func (a *Manager) WaitForRefresh() { a.waitForRefresh() }
+// Snapshot binds a request before reading its body, without starting a refresh.
+// It shares the content-validated cache with Current and Profile.
+func (a *Manager) Snapshot(ctx context.Context) (Credentials, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Credentials{}, err
+	}
+	doc, err := a.load()
+	if err != nil {
+		return Credentials{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
+	return doc.creds, nil
+}
+
+// Fresh reuses the request's snapshot unless it needs refresh. Recovery verifies
+// its login generation, so even proactive refresh cannot adopt a switched account.
+func (a *Manager) Fresh(ctx context.Context, snapshot Credentials) (Credentials, error) {
+	if err := ctx.Err(); err != nil {
+		return Credentials{}, err
+	}
+	if !needsRefresh(snapshot, time.Now()) {
+		return snapshot, nil
+	}
+	creds, _, err := a.Recover(ctx, snapshot)
+	return creds, err
+}
 
 func (a *Manager) load() (authDocument, error) {
-	doc, err := readAuth(a.path)
+	body, err := readAuthBody(a.path)
 	if err != nil {
-		return doc, err
+		return authDocument{}, err
 	}
-	if a.accountID == "" {
-		a.accountID = doc.creds.AccountID
-		a.identityKey = doc.creds.IdentityKey
+	// Metadata/inode checks alone cannot detect in-place, same-size rewrites
+	// with preserved timestamps. Read bounded bytes and cache parsing by content.
+	digest := sha256.Sum256(body)
+	if !a.cacheValid || digest != a.cachedHash {
+		doc, err := parseAuth(body)
+		if err != nil {
+			return doc, err
+		}
+		if a.accountID == "" {
+			a.accountID = doc.creds.AccountID
+			a.identityKey = doc.creds.IdentityKey
+		}
+		if doc.creds.AccountID != a.accountID || doc.creds.IdentityKey != a.identityKey {
+			return doc, errors.New("Codex account changed; restart the proxy to use the new account")
+		}
+		a.cachedDoc, a.cachedHash, a.cacheValid = doc, digest, true
+		a.published.Store(&profileSnapshot{digest: digest, profile: doc.profile})
 	}
-	if doc.creds.AccountID != a.accountID || doc.creds.IdentityKey != a.identityKey {
-		return doc, errors.New("Codex account changed; restart the proxy to use the new account")
-	}
+	doc := a.cachedDoc
+	// Refresh mutates map entries before persistence. Never alias the cache;
+	// RawMessage values are immutable and replaced, not edited in place.
+	doc.root = maps.Clone(doc.root)
+	doc.tokens = maps.Clone(doc.tokens)
 	doc.creds.Generation = a.generation
 	return doc, nil
 }
@@ -179,8 +234,8 @@ func (a *Manager) refresh(doc authDocument) (Credentials, error) {
 	if err != nil {
 		return Credentials{}, errors.New("Codex token refresh transport failure")
 	}
-	defer resp.Body.Close()
-	body, err := readBounded(resp.Body, 1<<20)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := httputil.ReadBounded(resp.Body, 1<<20)
 	if err != nil {
 		return Credentials{}, errors.New("cannot read Codex token refresh response")
 	}
@@ -230,6 +285,7 @@ func (a *Manager) refresh(doc authDocument) (Credentials, error) {
 	if err := a.persist(a.path, append(encoded, '\n')); err != nil {
 		return Credentials{}, fmt.Errorf("cannot persist refreshed Codex credentials: %w", err)
 	}
+	a.cacheValid = false
 	a.failedToken = ""
 	a.failedAccess = ""
 	a.refreshError = nil
@@ -237,22 +293,34 @@ func (a *Manager) refresh(doc authDocument) (Credentials, error) {
 	return stored.creds, err
 }
 
-func readAuth(path string) (authDocument, error) {
-	doc := authDocument{
-		root:   map[string]json.RawMessage{},
-		tokens: map[string]json.RawMessage{},
-	}
+func readAuthBody(path string) ([]byte, error) {
 	if err := storage.InspectFile(path); err != nil {
-		return doc, err
+		return nil, err
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return doc, fmt.Errorf("cannot open Codex auth file %q; run codex login: %w", path, err)
+		return nil, fmt.Errorf("cannot open Codex auth file %q; run codex login: %w", path, err)
 	}
-	defer file.Close()
-	body, err := readBounded(file, 1<<20)
+	defer func() { _ = file.Close() }() // Read-only descriptor; its data has already been consumed.
+	body, err := httputil.ReadBounded(file, 1<<20)
 	if err != nil {
-		return doc, errors.New("cannot read Codex auth file")
+		return nil, errors.New("cannot read Codex auth file")
+	}
+	return body, nil
+}
+
+func readAuth(path string) (authDocument, error) {
+	body, err := readAuthBody(path)
+	if err != nil {
+		return authDocument{}, err
+	}
+	return parseAuth(body)
+}
+
+func parseAuth(body []byte) (authDocument, error) {
+	doc := authDocument{
+		root:   map[string]json.RawMessage{},
+		tokens: map[string]json.RawMessage{},
 	}
 	if err := json.Unmarshal(body, &doc.root); err != nil || doc.root == nil {
 		return doc, errors.New("invalid Codex auth JSON")
@@ -278,16 +346,29 @@ func readAuth(path string) (authDocument, error) {
 	if missingCredentials || invalidHeaders {
 		return doc, errors.New("Codex access token or account ID missing/invalid; run codex login")
 	}
-	doc.creds.IdentityKey = profile(doc.creds.AccountID, jsonString(doc.tokens["id_token"]), doc.creds.AccessToken).Scope()
+	doc.profile = profile(doc.creds.AccountID, jsonString(doc.tokens["id_token"]), doc.creds.AccessToken)
+	doc.creds.IdentityKey = doc.profile.Scope()
 	doc.creds.LastRefresh, _ = time.Parse(time.RFC3339, jsonString(doc.root["last_refresh"]))
+	doc.creds.expiresAt = tokenExpiry(doc.creds.AccessToken)
 	return doc, nil
 }
 
-func needsRefresh(creds Credentials, now time.Time) bool {
-	claims := jwtClaims(creds.AccessToken)
+func tokenExpiry(token string) time.Time {
+	claims := jwtClaims(token)
 	var expiry int64
 	if err := json.Unmarshal(claims["exp"], &expiry); err == nil && expiry > 0 {
-		return time.Unix(expiry, 0).Before(now.Add(5 * time.Minute))
+		return time.Unix(expiry, 0)
+	}
+	return time.Time{}
+}
+
+func needsRefresh(creds Credentials, now time.Time) bool {
+	expiry := creds.expiresAt
+	if expiry.IsZero() {
+		expiry = tokenExpiry(creds.AccessToken)
+	}
+	if !expiry.IsZero() {
+		return expiry.Before(now.Add(5 * time.Minute))
 	}
 	return !creds.LastRefresh.IsZero() && creds.LastRefresh.Before(now.Add(-8*24*time.Hour))
 }
@@ -326,24 +407,8 @@ func permanentRefreshFailure(status int, body []byte) bool {
 
 func atomicWrite(path string, data []byte) error { return storage.AtomicWrite(path, data) }
 
-func readBounded(reader io.Reader, limit int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, errors.New("body exceeds size limit")
-	}
-	return body, nil
-}
-
-func jsonString(raw json.RawMessage) string {
-	var value string
-	_ = json.Unmarshal(raw, &value)
-	return value
-}
+func jsonString(raw json.RawMessage) string { return httputil.JSONString(raw) }
 
 func setJSON(object map[string]json.RawMessage, key string, value any) {
-	// Callers only supply JSON-encodable primitives or raw JSON maps.
-	object[key], _ = json.Marshal(value)
+	httputil.SetJSON(object, key, value)
 }

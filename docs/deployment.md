@@ -110,7 +110,7 @@ On a shared private Docker network, set Bifrost's custom OpenAI provider base UR
 Host port `8081` is for host clients; another container cannot use the host's loopback
 address. Restrict administrator access with network/firewall rules or an encrypted
 tunnel; mapping the host port to loopback does not restrict peers on the Docker network.
-No published registry image or image-release automation is assumed; build locally.
+Images are published to GHCR, or you can build locally using the multi-stage Dockerfile.
 
 ## Remote and container login
 

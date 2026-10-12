@@ -17,8 +17,14 @@ func TestPrepareResponsesRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.stream || prepared.model != "gpt-test" || prepared.tier != "priority" {
-		t.Fatal("client preferences not preserved")
+	if prepared.stream {
+		t.Fatal("client stream=false preference was not preserved")
+	}
+	if prepared.model != "gpt-test" {
+		t.Fatalf("prepared model=%q, want gpt-test", prepared.model)
+	}
+	if prepared.tier != "priority" {
+		t.Fatalf("prepared tier=%q, want priority", prepared.tier)
 	}
 	object := map[string]json.RawMessage{}
 	_ = json.Unmarshal(prepared.body, &object)
@@ -27,8 +33,11 @@ func TestPrepareResponsesRequest(t *testing.T) {
 			t.Errorf("unsupported field %s retained", field)
 		}
 	}
-	if string(object["stream"]) != "true" || string(object["store"]) != "false" {
-		t.Fatal("backend flags not forced")
+	if string(object["stream"]) != "true" {
+		t.Fatalf("backend stream=%s, want true", object["stream"])
+	}
+	if string(object["store"]) != "false" {
+		t.Fatalf("backend store=%s, want false", object["store"])
 	}
 	if string(object["parallel_tool_calls"]) != "false" {
 		t.Fatal("explicit parallel_tool_calls=false changed")
@@ -60,12 +69,20 @@ func TestNormalizeHistoryPreservesNativeItems(t *testing.T) {
 	object := map[string]json.RawMessage{}
 	_ = json.Unmarshal(prepared.body, &object)
 	items := []map[string]json.RawMessage{}
-	_ = json.Unmarshal(object["input"], &items)
+	if err := json.Unmarshal(object["input"], &items); err != nil {
+		t.Fatalf("normalized input could not be decoded: %v", err)
+	}
+	if len(items) != 5 {
+		t.Fatalf("normalized input count=%d, want 5", len(items))
+	}
 	if jsonString(items[0]["role"]) != "developer" {
 		t.Fatal("system role not normalized")
 	}
-	if jsonString(items[1]["encrypted_content"]) != "opaque" || jsonString(items[2]["arguments"]) != "{}" {
-		t.Fatal("native reasoning/tool items changed incorrectly")
+	if jsonString(items[1]["encrypted_content"]) != "opaque" {
+		t.Fatal("native encrypted reasoning changed")
+	}
+	if got := jsonString(items[2]["arguments"]); got != "{}" {
+		t.Fatalf("normalized tool arguments=%q, want {}", got)
 	}
 	if jsonString(items[3]["output"]) != "ok" {
 		t.Fatal("tool result lost")

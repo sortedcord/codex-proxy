@@ -40,8 +40,11 @@ func TestBifrostCompatibility(t *testing.T) {
 			w.WriteHeader(400)
 			return
 		}
-		if string(object["stream"]) != "true" || string(object["store"]) != "false" {
-			t.Error("Bifrost request did not normalize Codex flags")
+		if string(object["stream"]) != "true" {
+			t.Error("Bifrost request omitted backend stream=true")
+		}
+		if string(object["store"]) != "false" {
+			t.Error("Bifrost request omitted backend store=false")
 		}
 		if r.Header.Get("Authorization") == "Bearer bifrost-test-key" {
 			t.Error("Bifrost local key leaked to upstream")

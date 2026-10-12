@@ -3,8 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -16,10 +14,16 @@ import (
 	"time"
 
 	"github.com/sortedcord/codex-proxy/internal/config"
+	"github.com/sortedcord/codex-proxy/internal/httputil"
 	"github.com/sortedcord/codex-proxy/internal/oauth"
 )
 
-const maxRequestBytes = 16 << 20
+var forwardedHeaders = [...]string{
+	"Session-Id", "Session_id", "Conversation_id", "Thread-Id", "Version",
+	"X-Client-Request-Id", "X-Codex-Turn-State", "X-Codex-Turn-Metadata",
+	"X-Codex-Parent-Thread-Id", "X-Codex-Window-Id", "X-Codex-Beta-Features",
+	"X-Openai-Internal-Codex-Responses-Lite", "X-Openai-Subagent", "X-Oai-Attestation",
+}
 
 type proxy struct {
 	cfg    config.Config
@@ -42,12 +46,7 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !p.authorized(r) {
 		w.Header().Set("WWW-Authenticate", "Bearer")
-		writeError(
-			w,
-			http.StatusUnauthorized,
-			"invalid_api_key",
-			"invalid proxy API key",
-		)
+		errInvalidInferenceKey.reject(w, r)
 		return
 	}
 	path := r.URL.Path
@@ -62,19 +61,24 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
-		if !p.credentialsAvailable(w) {
+		creds, err := p.auth.Snapshot(r.Context())
+		if err != nil {
+			p.credentialsUnavailable(w, r)
 			return
 		}
-		p.models(w, r)
+		p.models(w, r, creds)
 	case "/responses", "/responses/compact":
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
-		if !p.credentialsAvailable(w) {
+		creds, err := p.auth.Snapshot(r.Context())
+		if err != nil {
+			p.credentialsUnavailable(w, r)
 			return
 		}
-		p.responses(w, r, path == "/responses/compact")
+		p.responses(w, r, path == "/responses/compact", creds)
 	default:
+		httputil.RejectUnreadBody(w, r)
 		writeError(
 			w,
 			http.StatusNotFound,
@@ -84,54 +88,17 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (p *proxy) credentialsAvailable(w http.ResponseWriter) bool {
-	if _, err := p.auth.Profile(); err == nil {
-		return true
-	}
-	writeError(
-		w,
-		http.StatusServiceUnavailable,
-		"credentials_unavailable",
-		"configure Codex credentials to use inference",
-	)
-	return false
+func (p *proxy) credentialsUnavailable(w http.ResponseWriter, r *http.Request) {
+	errCredentialsMissing.reject(w, r)
 }
 
 func (p *proxy) authorized(r *http.Request) bool {
-	if p.cfg.APIKey == "" {
-		return true
-	}
-	value := r.Header.Get("Authorization")
-	parts := strings.SplitN(value, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return false
-	}
-	expected := sha256.Sum256([]byte(p.cfg.APIKey))
-	provided := sha256.Sum256([]byte(parts[1]))
-	return subtle.ConstantTimeCompare(expected[:], provided[:]) == 1
+	return p.cfg.APIKey == "" || httputil.BearerMatches(r, p.cfg.APIKey)
 }
 
-func (p *proxy) responses(w http.ResponseWriter, r *http.Request, compact bool) {
-	if encoding := r.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
-		writeError(
-			w,
-			http.StatusUnsupportedMediaType,
-			"unsupported_encoding",
-			"send uncompressed JSON",
-		)
+func (p *proxy) responses(w http.ResponseWriter, r *http.Request, compact bool, creds oauth.Credentials) {
+	if !validateJSONRequest(w, r) {
 		return
-	}
-	if contentType := r.Header.Get("Content-Type"); contentType != "" {
-		mediaType, _, err := mime.ParseMediaType(contentType)
-		if err != nil || mediaType != "application/json" {
-			writeError(
-				w,
-				http.StatusUnsupportedMediaType,
-				"unsupported_media_type",
-				"send application/json",
-			)
-			return
-		}
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 	if err != nil {
@@ -163,6 +130,7 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request, compact bool) 
 		)
 		return
 	}
+	prepared.creds = creds
 	path := "/responses"
 	if compact {
 		path += "/compact"
@@ -179,7 +147,7 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request, compact bool) 
 		p.upstreamError(w, r, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	reader := newIdleReader(resp.Body, p.cfg.IdleTimeout, cancel)
 	defer reader.stop()
 	failed := resp.StatusCode < 200 || resp.StatusCode >= 300
@@ -229,7 +197,7 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request, compact bool) 
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (p *proxy) models(w http.ResponseWriter, r *http.Request) {
+func (p *proxy) models(w http.ResponseWriter, r *http.Request, creds oauth.Credentials) {
 	version := r.URL.Query().Get("client_version")
 	nativeCatalog := version != ""
 	if version == "" {
@@ -242,13 +210,13 @@ func (p *proxy) models(w http.ResponseWriter, r *http.Request) {
 		ctx,
 		r,
 		path,
-		preparedRequest{},
+		preparedRequest{creds: creds},
 	)
 	if err != nil {
 		p.upstreamError(w, r, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	reader := newIdleReader(resp.Body, p.cfg.IdleTimeout, cancel)
 	defer reader.stop()
 	failed := resp.StatusCode < 200 || resp.StatusCode >= 300
@@ -276,15 +244,33 @@ func (p *proxy) models(w http.ResponseWriter, r *http.Request) {
 		p.upstreamError(w, r, errors.New("invalid upstream model catalog"))
 		return
 	}
-	models := make([]map[string]any, 0, len(catalog.Models))
+	models := make([]modelEntry, 0, len(catalog.Models))
 	for _, model := range catalog.Models {
-		models = append(models, map[string]any{
-			"id": model.Slug, "object": "model", "created": 0, "owned_by": "openai",
+		models = append(models, modelEntry{
+			ID:      model.Slug,
+			Object:  "model",
+			Created: 0,
+			OwnedBy: "openai",
 		})
 	}
-	result, _ := json.Marshal(map[string]any{"object": "list", "data": models})
+	result, _ := json.Marshal(modelListResponse{
+		Object: "list",
+		Data:   models,
+	})
 	copyResponseHeaders(w.Header(), resp.Header)
 	writeJSON(w, http.StatusOK, result)
+}
+
+type modelEntry struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+}
+
+type modelListResponse struct {
+	Object string       `json:"object"`
+	Data   []modelEntry `json:"data"`
 }
 
 func (p *proxy) doUpstream(
@@ -293,7 +279,7 @@ func (p *proxy) doUpstream(
 	path string,
 	prepared preparedRequest,
 ) (*http.Response, error) {
-	creds, err := p.auth.Current(ctx)
+	creds, err := p.auth.Fresh(ctx, prepared.creds)
 	if err != nil {
 		return nil, err
 	}
@@ -340,12 +326,7 @@ func (p *proxy) setUpstreamHeaders(
 ) {
 	// Explicit allowlist: client API keys, cookies, account overrides and
 	// hop-by-hop headers must not cross the credential boundary.
-	for _, name := range []string{
-		"Session-Id", "Session_id", "Conversation_id", "Thread-Id", "Version",
-		"X-Client-Request-Id", "X-Codex-Turn-State", "X-Codex-Turn-Metadata",
-		"X-Codex-Parent-Thread-Id", "X-Codex-Window-Id", "X-Codex-Beta-Features",
-		"X-Openai-Internal-Codex-Responses-Lite", "X-Openai-Subagent", "X-Oai-Attestation",
-	} {
+	for _, name := range forwardedHeaders {
 		if connectionHeader(incoming, name) {
 			continue
 		}
@@ -360,12 +341,13 @@ func (p *proxy) setUpstreamHeaders(
 	if req.Header.Get("Version") == "" {
 		req.Header.Set("Version", p.cfg.ClientVersion)
 	}
-	req.Header.Set("Accept", "application/json")
-	if req.Method == http.MethodPost {
-		req.Header.Set("Content-Type", "application/json")
-	}
 	if strings.HasSuffix(req.URL.Path, "/responses") {
 		req.Header.Set("Accept", "text/event-stream")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
+	if req.Method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if prepared.model != "" {
 		hint := "model=" + prepared.model
@@ -394,7 +376,7 @@ func (p *proxy) forwardJSON(w http.ResponseWriter, r *http.Request, resp *http.R
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(httputil.WriteDeadline))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 }
@@ -405,7 +387,7 @@ func (p *proxy) forwardStream(w http.ResponseWriter, r *http.Request, resp *http
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(resp.StatusCode)
 	controller := http.NewResponseController(w)
-	_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
+	_ = controller.SetWriteDeadline(time.Now().Add(httputil.WriteDeadline))
 	if err := controller.Flush(); err != nil {
 		return
 	}
@@ -413,7 +395,7 @@ func (p *proxy) forwardStream(w http.ResponseWriter, r *http.Request, resp *http
 	for {
 		n, readErr := reader.Read(buffer)
 		if n > 0 {
-			_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			_ = controller.SetWriteDeadline(time.Now().Add(httputil.WriteDeadline))
 			if _, err := w.Write(buffer[:n]); err != nil {
 				return
 			}
@@ -421,15 +403,16 @@ func (p *proxy) forwardStream(w http.ResponseWriter, r *http.Request, resp *http
 				return
 			}
 		}
-		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) && r.Context().Err() == nil {
-				p.logger.Warn("upstream stream interrupted")
-				// Once 200 has been committed, abort rather than end a truncated
-				// stream cleanly or inject synthetic protocol events.
-				panic(http.ErrAbortHandler)
-			}
+		if readErr == nil {
+			continue
+		}
+		if errors.Is(readErr, io.EOF) || r.Context().Err() != nil {
 			return
 		}
+		p.logger.Warn("upstream stream interrupted")
+		// The reader distinguishes successful completion from premature EOF.
+		// Once 200 is committed, abort instead of fabricating protocol events.
+		panic(http.ErrAbortHandler)
 	}
 }
 
@@ -462,43 +445,6 @@ func copyResponseHeaders(destination, source http.Header) {
 			destination[name] = append([]string{}, values...)
 		}
 	}
-}
-
-func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
-	if r.Method == method {
-		return true
-	}
-	w.Header().Set("Allow", method)
-	writeError(
-		w,
-		http.StatusMethodNotAllowed,
-		"method_not_allowed",
-		"use "+method,
-	)
-	return false
-}
-
-func writeJSON(w http.ResponseWriter, status int, body []byte) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
-	w.WriteHeader(status)
-	_, _ = w.Write(body)
-}
-
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	errorType := "invalid_request_error"
-	switch {
-	case status == http.StatusUnauthorized:
-		errorType = "authentication_error"
-	case status == http.StatusTooManyRequests:
-		errorType = "rate_limit_error"
-	case status >= 500:
-		errorType = "server_error"
-	}
-	body, _ := json.Marshal(map[string]any{
-		"error": map[string]any{"type": errorType, "code": code, "message": message, "param": nil},
-	})
-	writeJSON(w, status, body)
 }
 
 func connectionHeader(headers http.Header, name string) bool {

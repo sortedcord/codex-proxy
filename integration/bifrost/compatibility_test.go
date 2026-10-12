@@ -50,18 +50,33 @@ func providerForTest(t *testing.T) (*openai.OpenAIProvider, schemas.Key) {
 	if err := json.Unmarshal(document.Providers["codex-proxy"], cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CustomProviderConfig == nil || cfg.OpenAIConfig == nil {
-		t.Fatal("example must configure an OpenAI-compatible custom provider")
+	if cfg.CustomProviderConfig == nil {
+		t.Fatal("example custom-provider configuration missing")
+	}
+	if cfg.OpenAIConfig == nil {
+		t.Fatal("example OpenAI-compatible configuration missing")
 	}
 	cfg.CustomProviderConfig.CustomProviderKey = "codex-proxy"
 	// The gateway registers configured provider prefixes before parsing ingress.
 	schemas.RegisterKnownProvider("codex-proxy")
 	allowed := cfg.CustomProviderConfig.AllowedRequests
-	if allowed == nil || !allowed.Responses || !allowed.ResponsesStream {
-		t.Fatal("example does not allow both Responses modes")
+	if allowed == nil {
+		t.Fatal("example allowed-requests configuration missing")
 	}
-	if allowed.ChatCompletion || allowed.ResponsesRetrieve || allowed.ResponsesCancel {
-		t.Fatal("example advertises unsupported operations")
+	if !allowed.Responses {
+		t.Fatal("example does not allow non-streaming Responses")
+	}
+	if !allowed.ResponsesStream {
+		t.Fatal("example does not allow streaming Responses")
+	}
+	if allowed.ChatCompletion {
+		t.Fatal("example advertises unsupported Chat Completions")
+	}
+	if allowed.ResponsesRetrieve {
+		t.Fatal("example advertises unsupported stored-response retrieval")
+	}
+	if allowed.ResponsesCancel {
+		t.Fatal("example advertises unsupported response cancellation")
 	}
 	if !cfg.OpenAIConfig.DisableStore {
 		t.Fatal("example must disable upstream storage")
@@ -73,8 +88,11 @@ func providerForTest(t *testing.T) (*openai.OpenAIProvider, schemas.Key) {
 	account := struct {
 		Keys []schemas.Key `json:"keys"`
 	}{Keys: []schemas.Key{}}
-	if err := json.Unmarshal(document.Providers["codex-proxy"], &account); err != nil || len(account.Keys) != 1 {
+	if err := json.Unmarshal(document.Providers["codex-proxy"], &account); err != nil {
 		t.Fatal("example provider key cannot be decoded")
+	}
+	if len(account.Keys) != 1 {
+		t.Fatalf("example key count=%d, want 1", len(account.Keys))
 	}
 	if account.Keys[0].Value.GetValue() != os.Getenv("BIFROST_TEST_API_KEY") {
 		t.Fatal("example provider key did not resolve its environment reference")
@@ -126,7 +144,13 @@ func TestListModels(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("Bifrost model discovery failed: %v", failure)
 	}
-	if len(response.Data) == 0 || !strings.HasPrefix(response.Data[0].ID, "codex-proxy/") {
+	if response == nil {
+		t.Fatal("Bifrost model listing missing")
+	}
+	if len(response.Data) == 0 {
+		t.Fatal("Bifrost model listing is empty")
+	}
+	if !strings.HasPrefix(response.Data[0].ID, "codex-proxy/") {
 		t.Fatal("Bifrost model listing lost its provider prefix")
 	}
 }
@@ -180,14 +204,26 @@ func TestResponsesNonStreaming(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("Bifrost non-streaming failed: %v", failure)
 	}
-	if response.ID == nil || response.Object != "response" || response.Usage == nil {
-		t.Fatal("Bifrost could not decode response identity or usage")
+	if response == nil {
+		t.Fatal("Bifrost response missing")
+	}
+	if response.ID == nil {
+		t.Fatal("Bifrost response ID missing")
+	}
+	if response.Object != "response" {
+		t.Fatalf("Bifrost object=%q, want response", response.Object)
+	}
+	if response.Usage == nil {
+		t.Fatal("Bifrost usage missing")
 	}
 	if !strings.Contains(textFromResponse(response), "BIFROST_OK") {
 		t.Fatal("Bifrost output text was lost")
 	}
-	if response.Metadata == nil || (*response.Metadata)["test"] != "bifrost" {
-		t.Fatal("Bifrost response metadata was lost")
+	if response.Metadata == nil {
+		t.Fatal("Bifrost response metadata missing")
+	}
+	if (*response.Metadata)["test"] != "bifrost" {
+		t.Fatal("Bifrost response metadata value was changed")
 	}
 	if os.Getenv("BIFROST_TEST_LIVE") != "true" && response.Usage.InputTokens != 12 {
 		t.Fatal("native usage was changed")
@@ -212,7 +248,10 @@ func TestResponsesStructuredOutput(t *testing.T) {
 	result := struct {
 		OK bool `json:"ok"`
 	}{}
-	if err := json.Unmarshal([]byte(textFromResponse(response)), &result); err != nil || !result.OK {
+	if err := json.Unmarshal([]byte(textFromResponse(response)), &result); err != nil {
+		t.Fatal("Bifrost structured output is not valid JSON")
+	}
+	if !result.OK {
 		t.Fatal("Bifrost structured-output schema was not honored")
 	}
 }
@@ -263,17 +302,29 @@ func TestResponsesStreaming(t *testing.T) {
 		}
 		if event.Type == schemas.ResponsesStreamResponseTypeCompleted {
 			completed = true
-			if event.Response == nil || event.Response.Usage == nil || len(event.Response.Output) == 0 {
-				t.Fatal("Bifrost terminal response lost usage or output")
+			if event.Response == nil {
+				t.Fatal("Bifrost terminal response missing")
+			}
+			if event.Response.Usage == nil {
+				t.Fatal("Bifrost terminal usage missing")
+			}
+			if len(event.Response.Output) == 0 {
+				t.Fatal("Bifrost terminal output is empty")
 			}
 			metadata := event.Response.Metadata
-			if metadata == nil || (*metadata)["stream_test"] != "bifrost" {
-				t.Fatal("Bifrost terminal response lost metadata")
+			if metadata == nil {
+				t.Fatal("Bifrost terminal metadata missing")
+			}
+			if (*metadata)["stream_test"] != "bifrost" {
+				t.Fatal("Bifrost terminal metadata value was changed")
 			}
 		}
 	}
-	if !completed || !sawOutput {
-		t.Fatal("Bifrost stream lost output or its terminal event")
+	if !completed {
+		t.Fatal("Bifrost stream lost its terminal event")
+	}
+	if !sawOutput {
+		t.Fatal("Bifrost stream lost output-item events")
 	}
 }
 
@@ -301,8 +352,14 @@ func TestResponsesStreamErrors(t *testing.T) {
 		}
 		sawError = true
 		detail := chunk.BifrostError.Error
-		if detail == nil || detail.Code == nil || *detail.Code != "context_length_exceeded" {
-			t.Fatal("Bifrost lost the native in-band error code")
+		if detail == nil {
+			t.Fatal("Bifrost in-band error details missing")
+		}
+		if detail.Code == nil {
+			t.Fatal("Bifrost in-band error code missing")
+		}
+		if *detail.Code != "context_length_exceeded" {
+			t.Fatalf("in-band error code=%q, want context_length_exceeded", *detail.Code)
 		}
 	}
 	if !sawError {
@@ -368,19 +425,34 @@ func TestResponsesErrors(t *testing.T) {
 		if prompt == "bifrost-inband-error" {
 			want = 400
 		}
-		if failure == nil || failure.StatusCode == nil {
-			t.Fatal("Bifrost did not receive an error status")
+		if failure == nil {
+			t.Fatal("Bifrost did not receive an error")
 		}
-		if *failure.StatusCode != want || failure.Error == nil || failure.Error.Code == nil {
-			t.Fatalf("Bifrost error lost its status or code: %v", failure)
+		if failure.StatusCode == nil {
+			t.Fatal("Bifrost error status missing")
+		}
+		if *failure.StatusCode != want {
+			t.Fatalf("Bifrost error status=%d, want %d", *failure.StatusCode, want)
+		}
+		if failure.Error == nil {
+			t.Fatal("Bifrost error details missing")
+		}
+		if failure.Error.Code == nil {
+			t.Fatal("Bifrost error code missing")
 		}
 	}
 	ctx := contextForTest(t)
 	request := requestFromJSON(t, ctx, `{"model":"codex-proxy/gpt-5.5","input":"test"}`)
 	key.Value = *schemas.NewSecretVar("wrong-proxy-key")
 	_, failure := provider.Responses(ctx, key, request)
-	if failure == nil || failure.Error == nil || failure.Error.Type == nil {
+	if failure == nil {
 		t.Fatal("Bifrost did not receive an authentication error")
+	}
+	if failure.Error == nil {
+		t.Fatal("Bifrost authentication error details missing")
+	}
+	if failure.Error.Type == nil {
+		t.Fatal("Bifrost authentication error type missing")
 	}
 	if *failure.Error.Type != "authentication_error" {
 		t.Fatalf("unexpected Bifrost auth error type: %q", *failure.Error.Type)

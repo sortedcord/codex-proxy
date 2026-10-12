@@ -31,15 +31,20 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version-file: go.mod
+          # Match the compiler used by the Dockerfile, not just the minimum language version.
+          go-version: '1.27.1'
           cache: false
       - name: Check formatting
         run: |
-          files=$(gofmt -l cmd internal)
+          files=$(gofmt -l cmd internal integration/bifrost)
           if [ -n "$files" ]; then
             printf '%s\n' "$files"
             exit 1
           fi
+      - name: Install pinned lint tooling
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+      - name: Strict lint and formatting
+        run: ./scripts/lint.sh
       - name: Vet
         run: go vet ./...
       - name: Race tests

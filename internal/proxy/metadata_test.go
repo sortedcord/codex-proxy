@@ -59,7 +59,10 @@ func TestMetadataResponsesBothModes(t *testing.T) {
 			"/v1/responses",
 			string(body),
 		)
-		if response.Code != 200 || !strings.Contains(response.Body.String(), `"metadata":{"tenant":"one"}`) {
+		if response.Code != http.StatusOK {
+			t.Fatalf("metadata response status=%d, want 200", response.Code)
+		}
+		if !strings.Contains(response.Body.String(), `"metadata":{"tenant":"one"}`) {
 			t.Fatal("client metadata not echoed in response")
 		}
 	}
@@ -87,14 +90,20 @@ func TestMetadataReaderPreservesFraming(t *testing.T) {
 		}
 	}
 	result := output.String()
-	if !strings.HasPrefix(result, keepalive+delta) || !strings.HasSuffix(result, ending) {
-		t.Fatal("metadata rewrite altered keepalive, delta, or done frame")
+	if !strings.HasPrefix(result, keepalive+delta) {
+		t.Fatalf("keepalive/delta framing changed: %q", result)
+	}
+	if strings.Contains(result, "[DONE]") {
+		t.Fatal("reader consumed data after the native terminal event")
 	}
 	if !strings.Contains(result, "event: response.completed\r\nid: last\r\nretry: 100\r\n") {
 		t.Fatal("SSE event/id/retry fields lost")
 	}
-	if !strings.Contains(result, `"metadata":{"tenant":"one"}`) || !strings.Contains(result, `"sequence_number":9`) {
-		t.Fatal("metadata or sequence number lost")
+	if !strings.Contains(result, `"metadata":{"tenant":"one"}`) {
+		t.Fatal("response metadata lost")
+	}
+	if !strings.Contains(result, `"sequence_number":9`) {
+		t.Fatal("event sequence number lost")
 	}
 }
 
@@ -109,7 +118,7 @@ func TestMetadataReaderLimitsAndMalformedEvents(t *testing.T) {
 			t.Fatal("invalid or oversized metadata stream accepted")
 		}
 	}
-	reader := newResponseStreamReader(strings.NewReader("data: {\"type\":\"response.ping\"}"), []byte(`{}`))
+	reader := newResponseStreamReader(strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"output\":[]}}"), []byte(`{}`))
 	if _, err := io.ReadAll(reader); err != nil {
 		t.Fatal("final unterminated frame rejected", err)
 	}

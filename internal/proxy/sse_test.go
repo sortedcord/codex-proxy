@@ -27,11 +27,17 @@ func TestCollectResponseRebuildsOrderedNativeOutput(t *testing.T) {
 	_ = json.Unmarshal(body, &response)
 	items := []map[string]json.RawMessage{}
 	_ = json.Unmarshal(response["output"], &items)
-	if len(items) != 2 || jsonString(items[0]["encrypted_content"]) != "opaque" {
+	if len(items) != 2 {
+		t.Fatalf("completed output count=%d, want 2", len(items))
+	}
+	if jsonString(items[0]["encrypted_content"]) != "opaque" {
 		t.Fatal("reasoning output lost or order changed")
 	}
-	if jsonString(items[1]["call_id"]) != "c1" || jsonString(response["id"]) != "resp_1" {
-		t.Fatal("tool call or response identity lost")
+	if got := jsonString(items[1]["call_id"]); got != "c1" {
+		t.Fatalf("tool call ID=%q, want c1", got)
+	}
+	if got := jsonString(response["id"]); got != "resp_1" {
+		t.Fatalf("response ID=%q, want resp_1", got)
 	}
 	if string(response["usage"]) != `{"input_tokens":9,"output_tokens":2}` {
 		t.Fatal("usage lost")
@@ -43,9 +49,14 @@ func TestCollectResponseKeepsTerminalOutput(t *testing.T) {
 		`"item":{"type":"message","id":"ignored"}}` + "\n\n" +
 		`data: {"type":"response.completed","response":{"output":[{"type":"message","id":"terminal"}]}}` + "\n\n"
 	body, err := collectResponse(strings.NewReader(stream))
-	correctOutput := strings.Contains(string(body), "terminal") && !strings.Contains(string(body), "ignored")
-	if err != nil || !correctOutput {
-		t.Fatalf("terminal output not authoritative: %s, %v", body, err)
+	if err != nil {
+		t.Fatalf("terminal response collection failed: %v", err)
+	}
+	if !strings.Contains(string(body), "terminal") {
+		t.Fatalf("authoritative terminal item missing: %s", body)
+	}
+	if strings.Contains(string(body), "ignored") {
+		t.Fatal("terminal response was overwritten with retained items")
 	}
 }
 
@@ -71,8 +82,11 @@ func TestTerminalFailureAndIncompleteAreNativeResponses(t *testing.T) {
 			status,
 		)
 		body, err := collectResponse(strings.NewReader(stream))
-		if err != nil || !strings.Contains(string(body), status) {
-			t.Fatalf("native terminal response lost: %v", err)
+		if err != nil {
+			t.Fatalf("native %s terminal response rejected: %v", status, err)
+		}
+		if !strings.Contains(string(body), status) {
+			t.Fatalf("terminal status=%q missing from response", status)
 		}
 	}
 }

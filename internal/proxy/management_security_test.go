@@ -30,8 +30,11 @@ func TestManagementDisabledAvoidsHistoryAndPolling(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	if runtime.status != nil || runtime.login != nil {
-		t.Fatal("disabled management started services")
+	if runtime.status != nil {
+		t.Fatal("disabled management started quota polling")
+	}
+	if runtime.login != nil {
+		t.Fatal("disabled management started login services")
 	}
 	if _, err := os.Stat(cfg.HistoryDir); !os.IsNotExist(err) {
 		t.Fatal("disabled management created history")

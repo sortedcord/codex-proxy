@@ -1,18 +1,11 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
-	"strings"
-)
-
-const (
-	maxEventBytes = 16 << 20
-	maxJSONBytes  = 32 << 20
 )
 
 type streamError struct {
@@ -57,6 +50,15 @@ func streamErrorStatus(signal string) int {
 	}
 }
 
+func isTerminalEventType(eventType string) bool {
+	switch eventType {
+	case "response.completed", "response.done", "response.incomplete", "response.failed", "error":
+		return true
+	default:
+		return false
+	}
+}
+
 // collectResponse retains completed output items because Codex may omit them
 // from the terminal response object. Deltas are never concatenated into guessed
 // messages: tool calls, reasoning, images, and unknown items remain native JSON.
@@ -76,17 +78,18 @@ func collectResponse(reader io.Reader) ([]byte, error) {
 		if err := json.Unmarshal(data, &event); err != nil {
 			return false, errors.New("invalid JSON in upstream event stream")
 		}
-		switch event.Type {
-		case "response.output_item.done":
+		if event.Type == "response.output_item.done" {
 			if err := output.add(event.OutputIndex, event.Item); err != nil {
 				return false, err
 			}
-		case "response.completed", "response.done", "response.incomplete", "response.failed":
+		}
+		if event.Type == "error" {
+			return false, newStreamError(data)
+		}
+		if isTerminalEventType(event.Type) {
 			var err error
 			result, err = output.complete(event.Response)
 			return true, err
-		case "error":
-			return false, newStreamError(data)
 		}
 		return false, nil
 	})
@@ -100,44 +103,21 @@ func collectResponse(reader io.Reader) ([]byte, error) {
 }
 
 func readSSE(reader io.Reader, consume func([]byte) (bool, error)) error {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), maxEventBytes)
-	var data strings.Builder
-	dispatch := func() (bool, error) {
-		if data.Len() == 0 {
-			return false, nil
+	scanner := newSSEScanner(reader)
+	for {
+		frame, err := scanner.next()
+		if errors.Is(err, io.EOF) {
+			return nil
 		}
-		payload := strings.TrimSuffix(data.String(), "\n")
-		data.Reset()
-		return consume([]byte(payload))
-	}
-	first := true
-	for scanner.Scan() {
-		line := scanner.Text()
-		if first {
-			line = strings.TrimPrefix(line, "\ufeff")
-			first = false
+		if err != nil {
+			return err
 		}
-		if line == "" {
-			done, err := dispatch()
-			if err != nil || done {
-				return err
-			}
+		if len(frame.data) == 0 {
 			continue
 		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
+		done, err := consume(frame.data)
+		if err != nil || done {
+			return err
 		}
-		value := strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
-		if data.Len()+len(value)+1 > maxEventBytes {
-			return errors.New("upstream SSE event exceeds size limit")
-		}
-		data.WriteString(value)
-		data.WriteByte('\n')
 	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	_, err := dispatch()
-	return err
 }

@@ -20,6 +20,7 @@ import (
 const (
 	maxHistoryBytes = 16 << 20
 	maxRecordBytes  = 64 << 10
+	compactBytes    = maxHistoryBytes * 4 / 5
 )
 
 type History struct {
@@ -28,10 +29,12 @@ type History struct {
 	accountID  string
 	maxSamples int
 	bytes      int64
+	records    int
 	samples    []quota.Snapshot
 	lock       *storage.Lock
 	fault      error
 	closed     bool
+	persist    func(string, []byte) error
 }
 
 func HistoryPath(dir, accountID string) string {
@@ -40,7 +43,7 @@ func HistoryPath(dir, accountID string) string {
 }
 
 func OpenHistory(dir, accountID string, maxSamples int) (*History, error) {
-	if accountID == "" || maxSamples < 1 || maxSamples > 10000 {
+	if accountID == "" || maxSamples < 1 || maxSamples > storage.MaxHistorySamples {
 		return nil, errors.New("history requires an account and bounded sample limit")
 	}
 	if err := storage.PrivateDir(dir); err != nil {
@@ -52,29 +55,43 @@ func OpenHistory(dir, accountID string, maxSamples int) (*History, error) {
 		return nil, err
 	}
 	history := &History{
-		path: path, accountID: accountID, maxSamples: maxSamples, lock: lock, samples: []quota.Snapshot{},
+		path:       path,
+		accountID:  accountID,
+		maxSamples: maxSamples,
+		lock:       lock,
+		samples:    []quota.Snapshot{},
+		persist:    storage.AtomicWrite,
 	}
 	if err := history.load(); err != nil {
-		_ = lock.Close()
-		return nil, err
+		return nil, errors.Join(err, lock.Close())
 	}
 	return history, nil
 }
 
-func (h *History) load() error {
+// Physical journals may retain 25% superseded records between compactions, while
+// API-visible samples remain strictly bounded. The byte cap is always enforced.
+func (h *History) recordLimit() int {
+	return h.maxSamples + max(1, h.maxSamples/4)
+}
+
+func (h *History) load() (loadErr error) {
 	if err := storage.InspectFile(h.path); err != nil {
 		return err
 	}
 	if _, err := os.Stat(h.path); errors.Is(err, os.ErrNotExist) {
-		if err := storage.AtomicWrite(h.path, []byte{}); err != nil {
+		if err := h.persist(h.path, []byte{}); err != nil {
 			return err
 		}
 	}
-	file, err := os.OpenFile(h.path, os.O_RDWR, 0600)
+	file, err := os.OpenFile(h.path, os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); !errors.Is(err, os.ErrClosed) {
+			loadErr = errors.Join(loadErr, err)
+		}
+	}()
 	info, err := file.Stat()
 	if err != nil {
 		return err
@@ -82,13 +99,27 @@ func (h *History) load() error {
 	if info.Size() > maxHistoryBytes {
 		return errors.New("quota history exceeds the 16 MiB limit")
 	}
-	if err := file.Chmod(0600); err != nil {
+	if err := file.Chmod(0o600); err != nil {
 		return err
 	}
+	if err := h.readRecords(file); err != nil {
+		return err
+	}
+	if h.records > h.recordLimit() {
+		// Windows requires closing the old file before replacing it.
+		if err := file.Close(); err != nil {
+			return err
+		}
+		return h.replace(h.samples, maxHistoryBytes)
+	}
+	return nil
+}
+
+func (h *History) readRecords(file *os.File) error {
 	reader := bufio.NewReader(io.LimitReader(file, maxHistoryBytes+1))
+	tail := snapshotTail{limit: h.maxSamples, samples: []quota.Snapshot{}}
 	var offset int64
-	var oldest int
-	compact := false
+	var count int
 	for {
 		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
@@ -99,44 +130,53 @@ func (h *History) load() error {
 		}
 		if len(line) > 0 {
 			if line[len(line)-1] != '\n' {
+				// Recover only an incomplete final line, never complete corruption.
 				if err := file.Truncate(offset); err != nil {
 					return err
 				}
 				if err := file.Sync(); err != nil {
 					return err
 				}
-				break // Recover only an incomplete last record, never complete corruption.
+				break
 			}
-			sample := quota.Snapshot{}
+			var sample quota.Snapshot
 			if err := json.Unmarshal(line, &sample); err != nil {
 				return errors.New("corrupt quota history record")
 			}
 			if err := h.validate(sample); err != nil {
 				return err
 			}
-			if len(h.samples) < h.maxSamples {
-				h.samples = append(h.samples, sample)
-			} else {
-				h.samples[oldest] = sample
-				oldest = (oldest + 1) % h.maxSamples
-				compact = true
-			}
+			tail.add(sample)
 			offset += int64(len(line))
+			count++
 		}
 		if errors.Is(readErr, io.EOF) {
 			break
 		}
 	}
-	h.bytes = offset
-	if compact {
-		h.samples = append(append([]quota.Snapshot{}, h.samples[oldest:]...), h.samples[:oldest]...)
-		// Close the old file before replacing it (required on Windows).
-		if err := file.Close(); err != nil {
-			return err
-		}
-		return h.replace(h.samples)
-	}
+	h.samples, h.bytes, h.records = tail.ordered(), offset, count
 	return nil
+}
+
+// Startup retains only the newest logical samples even when the physical journal
+// contains compaction slack. Ring insertion avoids shifting for every old record.
+type snapshotTail struct {
+	limit   int
+	oldest  int
+	samples []quota.Snapshot
+}
+
+func (t *snapshotTail) add(sample quota.Snapshot) {
+	if len(t.samples) < t.limit {
+		t.samples = append(t.samples, sample)
+		return
+	}
+	t.samples[t.oldest] = sample
+	t.oldest = (t.oldest + 1) % t.limit
+}
+
+func (t *snapshotTail) ordered() []quota.Snapshot {
+	return append(append([]quota.Snapshot{}, t.samples[t.oldest:]...), t.samples[:t.oldest]...)
 }
 
 func (h *History) validate(sample quota.Snapshot) error {
@@ -157,6 +197,8 @@ func (h *History) validate(sample quota.Snapshot) error {
 				continue
 			}
 			invalidPercentage := window.UsedPercent < 0 || window.UsedPercent > 100
+			// encoding/json round-trips float64 bits; recomputing the same
+			// subtraction after decoding preserves the original result.
 			consistent := window.RemainingPercent == 100-window.UsedPercent
 			if invalidPercentage || !consistent || window.WindowSeconds <= 0 {
 				return errors.New("invalid quota history measurement")
@@ -186,18 +228,22 @@ func (h *History) Append(sample quota.Snapshot) error {
 	if len(encoded) > maxRecordBytes {
 		return errors.New("quota observation exceeds size limit")
 	}
-	full := len(h.samples) >= h.maxSamples || h.bytes+int64(len(encoded)) > maxHistoryBytes
-	if full {
+	bytePressure := h.bytes+int64(len(encoded)) > maxHistoryBytes
+	if h.records >= h.recordLimit() || bytePressure {
 		samples := append(append([]quota.Snapshot{}, h.samples...), sample)
-		for len(samples) > h.maxSamples {
-			samples = samples[1:]
+		if len(samples) > h.maxSamples {
+			samples = samples[len(samples)-h.maxSamples:]
 		}
-		return h.replace(samples)
+		limit := maxHistoryBytes
+		if bytePressure {
+			limit = compactBytes
+		}
+		return h.replace(samples, limit)
 	}
 	if err := storage.InspectFile(h.path); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(h.path, os.O_WRONLY|os.O_APPEND, 0600)
+	file, err := os.OpenFile(h.path, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -205,43 +251,48 @@ func (h *History) Append(sample quota.Snapshot) error {
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}
-	closeErr := file.Close()
-	if err := errors.Join(writeErr, closeErr); err != nil {
+	if err := errors.Join(writeErr, file.Close()); err != nil {
 		h.fault = errors.New("quota history append durability failure; restart after checking storage")
 		return h.fault
 	}
 	h.samples = append(h.samples, sample)
+	if len(h.samples) > h.maxSamples {
+		h.samples = h.samples[len(h.samples)-h.maxSamples:]
+	}
+	h.records++
 	h.bytes += int64(len(encoded))
 	return nil
 }
 
-func (h *History) replace(samples []quota.Snapshot) error {
+func (h *History) replace(samples []quota.Snapshot, byteLimit int) error {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
+	ends := make([]int, 0, len(samples))
 	for _, sample := range samples {
 		if err := encoder.Encode(sample); err != nil {
 			return err
 		}
+		ends = append(ends, buffer.Len())
 	}
-	for buffer.Len() > maxHistoryBytes && len(samples) > 1 {
-		samples = samples[1:]
-		buffer.Reset()
-		for _, sample := range samples {
-			if err := encoder.Encode(sample); err != nil {
-				return err
-			}
-		}
+	// Encode once and use exact record lengths, not average-size estimates.
+	var start, offset int
+	for buffer.Len()-offset > byteLimit && start < len(samples)-1 {
+		offset = ends[start]
+		start++
 	}
-	if err := storage.AtomicWrite(h.path, buffer.Bytes()); err != nil {
-		var committed *storage.CommitError
-		if errors.As(err, &committed) {
-			h.fault = errors.New("quota history replacement durability failure")
-		}
+	samples = samples[start:]
+	body := buffer.Bytes()[offset:]
+	err := h.persist(h.path, body)
+	var committed *storage.CommitError
+	if err != nil && !errors.As(err, &committed) {
 		return err
 	}
 	h.samples = append([]quota.Snapshot{}, samples...)
-	h.bytes = int64(buffer.Len())
-	return nil
+	h.bytes, h.records = int64(len(body)), len(samples)
+	if err != nil {
+		h.fault = errors.New("quota history replacement durability failure")
+	}
+	return err
 }
 
 func (h *History) Latest() (quota.Snapshot, bool) {

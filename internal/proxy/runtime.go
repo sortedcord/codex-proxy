@@ -53,7 +53,7 @@ func newRuntime(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(cfg.AuthFile), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(cfg.AuthFile), 0o700); err != nil {
 		return nil, err
 	}
 	if err := storage.InspectFile(cfg.AuthFile); err != nil {
@@ -75,29 +75,38 @@ func newRuntime(
 	if tokenURL == "" {
 		tokenURL = oauth.DefaultTokenURL
 	}
+	rt := &Runtime{
+		cfg:    cfg,
+		client: client,
+		lock:   lock,
+		cancel: cancel,
+	}
 	auth, err := oauth.NewManager(cfg.AuthFile, client, tokenURL)
 	if err != nil {
-		cancel()
-		client.CloseIdleConnections()
-		_ = lock.Close()
+		_ = rt.Close()
 		return nil, err
 	}
-	runtime := &Runtime{cfg: cfg, auth: auth, client: client, lock: lock, cancel: cancel}
-	runtime.inference = newProxy(
+	rt.auth = auth
+	rt.inference = newProxy(
 		cfg,
 		auth,
 		client,
 		logger,
 	)
 	if cfg.ManagementKey == "" {
-		return runtime, nil
+		return rt, nil
 	}
 	fetcher := &quota.Fetcher{
-		Client: client, Endpoint: cfg.UsageURL, UserAgent: cfg.UserAgent, ClientVersion: cfg.ClientVersion,
+		Client:        client,
+		Endpoint:      cfg.UsageURL,
+		UserAgent:     cfg.UserAgent,
+		ClientVersion: cfg.ClientVersion,
 	}
-	runtime.status, err = status.NewService(owned, status.Options{
-		Dir: cfg.HistoryDir, MaxSamples: cfg.HistoryMaxSamples, Interval: cfg.PollInterval,
-		Account: auth.Profile,
+	rt.status, err = status.NewService(owned, status.Options{
+		Dir:        cfg.HistoryDir,
+		MaxSamples: cfg.HistoryMaxSamples,
+		Interval:   cfg.PollInterval,
+		Account:    auth.Profile,
 		Fetch: func(ctx context.Context) (quota.Snapshot, error) {
 			creds, err := auth.Current(ctx)
 			if err != nil {
@@ -107,20 +116,17 @@ func newRuntime(
 		},
 	})
 	if err != nil {
-		cancel()
-		auth.WaitForRefresh()
-		client.CloseIdleConnections()
-		_ = lock.Close()
+		_ = rt.Close()
 		return nil, err
 	}
 	loginOptions.Client = client
-	loginOptions.Activate = runtime.activate
-	runtime.login, err = oauth.NewSessionManager(owned, loginOptions)
+	loginOptions.Activate = rt.activate
+	rt.login, err = oauth.NewSessionManager(owned, loginOptions)
 	if err != nil {
-		_ = runtime.Close()
+		_ = rt.Close()
 		return nil, err
 	}
-	return runtime, nil
+	return rt, nil
 }
 
 func (r *Runtime) activate(ctx context.Context, tokens oauth.Tokens) (oauth.Profile, error) {
@@ -140,16 +146,24 @@ func (r *Runtime) activate(ctx context.Context, tokens oauth.Tokens) (oauth.Prof
 
 func (r *Runtime) Close() error {
 	r.closeOnce.Do(func() {
-		r.cancel()
+		if r.cancel != nil {
+			r.cancel()
+		}
 		if r.login != nil {
 			r.login.Close()
 		}
 		if r.status != nil {
 			r.closeErr = r.status.Close()
 		}
-		r.auth.WaitForRefresh()
-		r.client.CloseIdleConnections()
-		r.closeErr = errors.Join(r.closeErr, r.lock.Close())
+		if r.auth != nil {
+			r.auth.WaitForRefresh()
+		}
+		if r.client != nil {
+			r.client.CloseIdleConnections()
+		}
+		if r.lock != nil {
+			r.closeErr = errors.Join(r.closeErr, r.lock.Close())
+		}
 	})
 	return r.closeErr
 }

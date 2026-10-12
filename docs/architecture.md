@@ -14,6 +14,7 @@ remains Codex-specific and standard-library-only:
 - `internal/status`: independent polling, cached read APIs, private bounded journals,
   account attribution, staleness and historical filtering.
 - `internal/storage`: regular-file checks, private atomic writes and native OS locks.
+- `internal/httputil`: bounded reads and shared authentication/HTTP helpers.
 
 ## Inference fidelity
 
@@ -21,6 +22,9 @@ Only the necessary Codex compatibility fields are normalized. Native completed o
 items and raw JSON retain numeric precision and unknown extension fields. SSE preserves
 frames except response metadata and missing terminal output; it does not fabricate
 messages from delta text. Non-streaming collects the same native terminal semantics.
+Both modes use one bounded SSE frame parser. Native terminal events (including errors)
+end streaming immediately, without another network read or optional legacy `[DONE]`.
+Premature EOF aborts the downstream connection rather than reporting successful completion.
 
 The downstream inference key is never an upstream token. The proxy selects the account
 credential itself, ignores client cookies/account overrides, and forwards only safe
@@ -43,7 +47,11 @@ rollback. Pre-commit failure keeps the old account unchanged.
 Each request obtains a credential snapshot. Recovery compares the rejected snapshot's
 account ID and login generation before adopting newer tokens. Even a fresh login into
 the same workspace cannot replay an old request under replacement credentials. External file account replacement
-is not an implicit authorized hot-switch.
+is not an implicit authorized hot-switch. Inference binds that snapshot before reading
+the request body and avoids a second credential read unless refresh is needed.
+Bounded credential bytes are checked by content hash, not mtime/size; cached parsing
+cannot hide same-size external rotation. Returned auth maps do not alias the cache.
+Unchanged non-secret profile snapshots can be read without waiting for refresh I/O.
 
 ## Quota/history lifecycle
 
@@ -55,12 +63,19 @@ inference or cause fabricated available capacity.
 Observations are attributed to the credentials that fetched them, including a response
 arriving after an account switch. Each hashed journal verifies record identity (workspace plus reported user identity),
 uses private files and a lifetime lock, syncs appends, and compacts retained samples by
-atomic replacement. Files are bounded to 16 MiB and configured sample count; records
-to 64 KiB. Startup discards only an incomplete final line; complete malformed records
-fail closed. Pagination filters the retained snapshots before sorting/counting.
+atomic replacement. API-visible samples always obey the configured retention count.
+The physical journal allows up to 25% superseded-record slack (at least one record)
+between compactions and is always bounded to 16 MiB; records are bounded to 64 KiB.
+Byte-pressure compaction targets 80% of the cap for append headroom, using exact
+record sizes instead of estimates. Startup restores only the newest logical samples,
+and discards only an incomplete final line; complete malformed records fail closed.
+Post-rename sync failures publish the disk state in memory and stop further writes.
+Pagination filters the retained snapshots before sorting/counting.
 
 At most two account histories are cached. Older accounts remain on disk and can be
-reopened on an explicit switch back. Runtime shutdown cancels/joins polling and login,
+reopened on an explicit switch back. If the active identity is unavailable, opening a
+third history fails without eviction. Account callbacks run outside the cache lock.
+Runtime shutdown cancels/joins polling and login,
 waits for independent bounded credential refresh, closes transports and releases locks.
 
 ## Verification boundaries

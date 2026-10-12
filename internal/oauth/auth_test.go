@@ -71,8 +71,11 @@ func TestConcurrentRefreshPersistsRotation(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
 		}
-		if payload["client_id"] != ClientID || payload["grant_type"] != "refresh_token" {
-			t.Errorf("incorrect refresh request: %v", payload)
+		if payload["client_id"] != ClientID {
+			t.Errorf("client ID=%q, want %q", payload["client_id"], ClientID)
+		}
+		if payload["grant_type"] != "refresh_token" {
+			t.Errorf("grant type=%q, want refresh_token", payload["grant_type"])
 		}
 		if payload["refresh_token"] != "dummy-refresh" {
 			t.Error("incorrect refresh token")
@@ -95,13 +98,16 @@ func TestConcurrentRefreshPersistsRotation(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			creds, err := auth.current(context.Background())
+			creds, err := auth.Current(context.Background())
 			if err != nil {
 				t.Error(err)
 				return
 			}
-			if creds.AccessToken != newAccess || creds.RefreshToken != "rotated-refresh" {
-				t.Error("rotation not observed")
+			if creds.AccessToken != newAccess {
+				t.Error("rotated access token not observed")
+			}
+			if creds.RefreshToken != "rotated-refresh" {
+				t.Error("rotated refresh token not observed")
 			}
 		}()
 	}
@@ -113,8 +119,11 @@ func TestConcurrentRefreshPersistsRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if jsonString(doc.tokens["extra_token"]) != "preserve" || jsonString(doc.tokens["id_token"]) != "rotated-id" {
-		t.Error("token fields were lost")
+	if jsonString(doc.tokens["extra_token"]) != "preserve" {
+		t.Error("unknown token metadata was lost")
+	}
+	if jsonString(doc.tokens["id_token"]) != "rotated-id" {
+		t.Error("rotated ID token was not persisted")
 	}
 	extra := map[string]string{}
 	_ = json.Unmarshal(doc.root["extra"], &extra)
@@ -138,14 +147,17 @@ func TestReactiveRefreshCoalescesAndReloads(t *testing.T) {
 	}))
 	defer upstream.Close()
 	auth := newTestAuth(t, upstream.URL)
-	old, err := auth.current(context.Background())
+	old, err := auth.Current(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range 10 {
-		creds, _, err := auth.recover(context.Background(), old.AccessToken)
-		if err != nil || creds.AccessToken != "new-access" {
-			t.Fatalf("recover = %v, %v", creds.AccessToken, err)
+		creds, _, err := auth.recover(context.Background(), old.AccessToken, nil)
+		if err != nil {
+			t.Fatalf("recovery failed: %v", err)
+		}
+		if creds.AccessToken != "new-access" {
+			t.Fatal("recovery did not use the refreshed access token")
 		}
 	}
 	if calls.Load() != 1 {
@@ -157,10 +169,15 @@ func TestReactiveRefreshCoalescesAndReloads(t *testing.T) {
 		"external-access",
 		"external-refresh",
 	)
-	creds, refreshed, err := auth.recover(context.Background(), "new-access")
-	reloaded := err == nil && !refreshed && creds.AccessToken == "external-access"
-	if !reloaded {
-		t.Fatalf("disk reload failed: refreshed=%v, error=%v", refreshed, err)
+	creds, refreshed, err := auth.recover(context.Background(), "new-access", nil)
+	if err != nil {
+		t.Fatalf("disk reload failed: %v", err)
+	}
+	if refreshed {
+		t.Fatal("disk reload unnecessarily refreshed credentials")
+	}
+	if creds.AccessToken != "external-access" {
+		t.Fatal("disk reload missed the external access token")
 	}
 }
 
@@ -180,9 +197,12 @@ func TestPermanentRefreshFailureCachedUntilCredentialsChange(t *testing.T) {
 		"dummy-refresh",
 	)
 	for range 3 {
-		_, _, err := auth.recover(context.Background(), "rejected")
-		if err == nil || strings.Contains(err.Error(), "secret-must-not-leak") {
-			t.Fatal("refresh errors must be sanitized")
+		_, _, err := auth.recover(context.Background(), "rejected", nil)
+		if err == nil {
+			t.Fatal("rejected refresh returned no error")
+		}
+		if strings.Contains(err.Error(), "secret-must-not-leak") {
+			t.Fatal("refresh error exposed the upstream response")
 		}
 	}
 	if calls.Load() != 1 {
@@ -194,7 +214,7 @@ func TestPermanentRefreshFailureCachedUntilCredentialsChange(t *testing.T) {
 		"new",
 		"fresh-login",
 	)
-	_, _, _ = auth.recover(context.Background(), "new")
+	_, _, _ = auth.recover(context.Background(), "new", nil)
 	if calls.Load() != 2 {
 		t.Fatal("new login did not reset failure cache")
 	}
@@ -219,9 +239,12 @@ func TestRefreshDoesNotOverwriteExternalRotation(t *testing.T) {
 		"rejected",
 		"dummy-refresh",
 	)
-	creds, _, err := auth.recover(context.Background(), "rejected")
-	if err != nil || creds.AccessToken != "external-access" {
-		t.Fatalf("external rotation overwritten: %v", err)
+	creds, _, err := auth.recover(context.Background(), "rejected", nil)
+	if err != nil {
+		t.Fatalf("recovery after external rotation failed: %v", err)
+	}
+	if creds.AccessToken != "external-access" {
+		t.Fatal("external rotation was overwritten")
 	}
 }
 
@@ -244,7 +267,7 @@ func TestRefreshCompletesAfterClientCancellation(t *testing.T) {
 		"dummy-refresh",
 	)
 	go func() {
-		_, _, err := auth.recover(ctx, "rejected")
+		_, _, err := auth.recover(ctx, "rejected", nil)
 		done <- err
 	}()
 	<-started
@@ -254,10 +277,14 @@ func TestRefreshCompletesAfterClientCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc, err := readAuth(auth.path)
-	persisted := err == nil && doc.creds.AccessToken == "new-access"
-	preservedRefresh := doc.creds.RefreshToken == "dummy-refresh"
-	if !persisted || !preservedRefresh {
-		t.Fatal("refresh did not persist after cancellation or lost omitted refresh token")
+	if err != nil {
+		t.Fatalf("cannot read persisted refresh after cancellation: %v", err)
+	}
+	if doc.creds.AccessToken != "new-access" {
+		t.Fatal("refresh did not persist after cancellation")
+	}
+	if doc.creds.RefreshToken != "dummy-refresh" {
+		t.Fatal("omitted refresh token was not preserved")
 	}
 }
 
@@ -273,13 +300,13 @@ func TestAuthFailsClosedOnLogoutAndAccountSwitch(t *testing.T) {
 	if err := atomicWrite(auth.path, body); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := auth.current(context.Background()); err == nil {
+	if _, err := auth.Current(context.Background()); err == nil {
 		t.Fatal("account switch accepted")
 	}
 	if err := os.Remove(auth.path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := auth.current(context.Background()); err == nil {
+	if _, err := auth.Current(context.Background()); err == nil {
 		t.Fatal("deleted credentials accepted")
 	}
 }

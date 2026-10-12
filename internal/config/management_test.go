@@ -20,8 +20,11 @@ func TestManagementKeysAndQuotaConfiguration(t *testing.T) {
 		t.Fatal("default quota URL is wrong")
 	}
 	for _, args := range [][]string{
-		{"-quota-poll-interval", "1s"}, {"-quota-poll-interval", "25h"}, {"-history-max-samples", "0"},
-		{"-history-max-samples", "10001"}, {"-usage-url", "http://example.com/usage"},
+		{"-quota-poll-interval", "1s"},
+		{"-quota-poll-interval", "25h"},
+		{"-history-max-samples", "0"},
+		{"-history-max-samples", "10001"},
+		{"-usage-url", "http://example.com/usage"},
 	} {
 		if _, err := Parse(args, io.Discard); err == nil {
 			t.Fatal("unsafe management settings accepted")
