@@ -1,0 +1,12 @@
+# Merge into your Codex config; this is not a credential file.
+model_provider = "codex_proxy"
+model = "gpt-5.5"
+
+[model_providers.codex_proxy]
+name = "codex-proxy"
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+# Uncomment when CODEX_PROXY_API_KEY is configured on both proxy and client:
+# env_key = "CODEX_PROXY_API_KEY"

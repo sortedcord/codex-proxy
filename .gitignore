@@ -1,0 +1,14 @@
+/reference-projects/
+/.codegraph/
+/bin/
+/codex-proxy
+/coverage.out
+.env
+.env.*
+!.env.example
+# Credentials and runtime state must never be committed.
+auth.json
+mcp-auth.json
+*.auth.json
+.auth-*
+*.log
