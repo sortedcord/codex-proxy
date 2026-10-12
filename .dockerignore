@@ -1,0 +1,33 @@
+**
+!Dockerfile
+!.dockerignore
+!go.mod
+
+# Re-include source directories, then allow only Go files inside them.
+# Keep this allowlist in sync when adding source packages.
+!cmd/
+cmd/*
+!cmd/codex-proxy/
+cmd/codex-proxy/*
+!cmd/codex-proxy/*.go
+
+!internal/
+internal/*
+!internal/config/
+internal/config/*
+!internal/config/*.go
+!internal/oauth/
+internal/oauth/*
+!internal/oauth/*.go
+!internal/proxy/
+internal/proxy/*
+!internal/proxy/*.go
+!internal/quota/
+internal/quota/*
+!internal/quota/*.go
+!internal/status/
+internal/status/*
+!internal/status/*.go
+!internal/storage/
+internal/storage/*
+!internal/storage/*.go

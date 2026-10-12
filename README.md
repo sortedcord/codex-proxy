@@ -36,6 +36,19 @@ Choose a model returned by `/v1/models`. Use `stream:true` and `curl -N` for SSE
 If an inference key is configured, add `Authorization: Bearer $CODEX_PROXY_API_KEY`
 to model and Responses requests. The proxy exposes **unprefixed** model IDs.
 
+### Docker
+
+A multi-stage [Dockerfile](Dockerfile), matching Antigravity Proxy's approach, builds
+into a non-root `scratch` image containing only the static binary and CA certificates:
+
+```sh
+docker build -t codex-proxy .
+```
+
+The image listens on `0.0.0.0:8080`, so **`CODEX_PROXY_API_KEY` is required**.
+See [Docker deployment](docs/deployment.md#docker) for persistent writable credential/
+history mounts, a read-only root filesystem, and container OAuth login.
+
 ## Optional management
 
 Set a **separate** management key to enable all management APIs, quota polling,

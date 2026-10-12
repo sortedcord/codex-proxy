@@ -25,6 +25,45 @@ jobs:
       - run: go test -race -cover ./...
       - run: go build -trimpath -ldflags='-s -w' -o bin/codex-proxy ./cmd/codex-proxy
 
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container image
+        run: docker build -t codex-proxy:test .
+      - name: Smoke test the non-root, read-only container
+        run: |
+          set -eu
+          test "$(docker image inspect -f '{{.Config.User}}' codex-proxy:test)" = '10001:10001'
+          trap 'docker logs codex-proxy-smoke; docker rm -f -v codex-proxy-smoke' EXIT
+          docker run -d \
+            --name codex-proxy-smoke \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --mount type=volume,dst=/home/app/.codex \
+            --mount type=volume,dst=/home/app/.local/share/codex-proxy \
+            -p 127.0.0.1:8080:8080 \
+            -e CODEX_PROXY_API_KEY=docker-smoke-inference \
+            -e CODEX_PROXY_MANAGEMENT_KEY=docker-smoke-management \
+            codex-proxy:test
+          curl --fail --retry 20 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:8080/health > health.json
+          python3 - <<'PY'
+          import json
+          with open('health.json') as stream:
+              health = json.load(stream)
+          assert health['status'] == 'ok'
+          assert health['credential_configured'] is False
+          PY
+          test "$(curl -sS -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:8080/status/account)" = 401
+          test "$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Authorization: Bearer docker-smoke-management' \
+            http://127.0.0.1:8080/status/account)" = 503
+          docker stop --time 30 codex-proxy-smoke
+          test "$(docker inspect -f '{{.State.ExitCode}}' codex-proxy-smoke)" = 0
+
   bifrost:
     runs-on: ubuntu-latest
     steps:
