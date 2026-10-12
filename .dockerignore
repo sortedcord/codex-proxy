@@ -16,6 +16,9 @@ internal/*
 !internal/config/
 internal/config/*
 !internal/config/*.go
+!internal/httputil/
+internal/httputil/*
+!internal/httputil/*.go
 !internal/oauth/
 internal/oauth/*
 !internal/oauth/*.go
