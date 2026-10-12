@@ -38,8 +38,23 @@ to model and Responses requests. The proxy exposes **unprefixed** model IDs.
 
 ### Docker
 
-A multi-stage [Dockerfile](Dockerfile) builds into a non-root `scratch` image containing
-only the static binary and CA certificates:
+The [Docker image workflow](.github/workflows/docker.yml) publishes images to
+**`ghcr.io/sortedcord/codex-proxy`** for `linux/amd64` and `linux/arm64`, after Go
+formatting, vet, and race tests pass:
+
+```sh
+docker pull ghcr.io/sortedcord/codex-proxy:latest
+```
+
+Pushes to `main` publish `main`, `latest`, and `sha-<full-commit>` tags. Version
+pushes such as `v1.2.3` publish `1.2.3`, `1.2`, and `1` tags (stable releases also
+update `latest`). Pull requests targeting `main` build both platforms without
+logging in or publishing. The workflow also supports manual runs and uses the
+built-in `GITHUB_TOKEN`; no separate registry secret is required. For anonymous
+pulls, set the GHCR package visibility to **public** after its first publication.
+
+To build locally, a multi-stage [Dockerfile](Dockerfile) produces a non-root
+`scratch` image containing only the static binary and CA certificates:
 
 ```sh
 docker build -t codex-proxy .
