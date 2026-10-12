@@ -38,8 +38,8 @@ to model and Responses requests. The proxy exposes **unprefixed** model IDs.
 
 ### Docker
 
-A multi-stage [Dockerfile](Dockerfile), matching Antigravity Proxy's approach, builds
-into a non-root `scratch` image containing only the static binary and CA certificates:
+A multi-stage [Dockerfile](Dockerfile) builds into a non-root `scratch` image containing
+only the static binary and CA certificates:
 
 ```sh
 docker build -t codex-proxy .
@@ -53,7 +53,7 @@ history mounts, a read-only root filesystem, and container OAuth login.
 
 Set a **separate** management key to enable all management APIs, quota polling,
 and history. Without it, those APIs return `503`, and there is no background quota
-polling or history initialization. Never give this key to Bifrost or inference clients.
+polling or history initialization. Never give this key to inference clients.
 
 ```sh
 # Generate and store keys outside this repository. OpenSSL is only an example.
@@ -185,96 +185,43 @@ For Docker/private networks, use a reachable proxy address and Bifrost's
 | `GET /config/login` | Management key | Begin/reuse a pending browser login |
 | `POST /config/login` | Management key | Complete login and replace the active account |
 
-`/healthz` is removed. Inference aliases without `/v1` and under `/backend-api/codex`
-remain available. Management routes have no inference aliases. Headers only for keys;
-no query-key authentication, CORS, stored-response lifecycle, or account pooling.
+Inference aliases without `/v1` and under `/backend-api/codex` remain available.
+Management routes have no inference aliases. Authentication requires headers (no
+query parameters).
 
-**Compatibility boundaries:** Codex requires `stream:true` / `store:false` upstream.
-Both response modes restore omitted terminal output from completed native items.
-Tool calls, reasoning, usage and unknown JSON fields retain their native shape and
-precision. Metadata is kept locally and echoed; `stream_options.include_usage` is
-removed because native terminal responses already contain usage. Full input history
-is required: background execution, `previous_response_id`, conversation IDs and stored
-prompt references are rejected. Sampling/output-limit parameters unsupported by Codex
-are removed; **do not rely on them to cap output**. No streaming inference replay.
-
-Live compaction previously returned upstream `404`; local tests cover forwarding,
-not fabricated fallback behavior. See [API details](docs/api.md).
+**Compatibility notes:** Codex requires `stream:true` / `store:false` upstream.
+Both streaming and non-streaming modes restore omitted terminal output. Tool calls,
+reasoning, and usage retain native shapes. Full input history is required;
+`previous_response_id`, background execution, and stored prompt references are
+not supported by the Codex backend. Sampling and output-limit parameters unsupported
+by Codex are ignored. See [API details](docs/api.md).
 
 ## Safety and configuration
 
 - Loopback by default; non-loopback requires `CODEX_PROXY_API_KEY`. Remote access
-  additionally needs TLS and a firewall or encrypted tunnel. Management key possession
-  permits account replacement, so keep management access restricted to administrators.
+  additionally needs TLS and a firewall or encrypted tunnel.
+- Restrict management key access to administrators; it permits account replacement.
 - Upstream and quota URLs are operator-controlled trust boundaries receiving access
-  tokens. HTTPS only, except loopback HTTP tests; redirects are never followed.
-- Credential saves use private synced atomic files. Unknown fields survive refresh;
-  explicit login writes a fresh account document. A post-rename durability failure
-  reports uncertainty while reflecting the account actually written to disk.
+  tokens. HTTPS only (except local loopback tests); redirects are never followed.
 - The proxy locks its auth file and history against other proxy processes. **Official
   Codex does not honor those locks.** Do not run a directly authenticated Codex process
   or another token-refreshing tool against the same auth file concurrently.
-- Request bodies: 16 MiB; login JSON: 64 KiB; SSE frames: 16 MiB; buffered output:
-  32 MiB. Idle/cancellation handling and bounded writes apply to inference. Quota
-  history retains at most 10,000 samples and 16 MiB per account, with private files,
-  bounded pagination, torn-tail recovery, and fail-closed complete-corruption checks.
-- No prompts, responses, token values, OAuth codes or authorization URLs are logged.
-  Credentials, histories and runtime lock files must remain untracked.
+- Request limits: bodies up to 16 MiB, SSE frames up to 16 MiB, buffered output up to 32 MiB.
+- No prompts, responses, token values, OAuth codes, or authorization URLs are logged.
+  Credentials, histories, and runtime lock files must remain untracked.
 
-Full flag/environment reference: [Configuration](docs/configuration.md).
-Remote setup and process ownership: [Deployment](docs/deployment.md).
-Lifecycle and package structure: [Architecture](docs/architecture.md).
+For more details:
+- [Configuration](docs/configuration.md) — full flag and environment reference
+- [Deployment](docs/deployment.md) — remote setup and process management
+- [Architecture](docs/architecture.md) — internal design and lifecycles
+- [API Reference](docs/api.md) — endpoints and payloads
 
-## Tests
+## Testing
 
-Normal tests use synthetic credentials and local HTTP servers only:
+Run the test suite:
 
 ```sh
 ./scripts/test.sh
 # Or:
-go test -race -cover ./...
-go vet ./...
+go test -race ./...
 ```
-
-Bifrost's SDK is isolated in `integration/bifrost`, adding **no runtime dependencies**.
-That test-only module requires **Go 1.27+**; the proxy itself remains Go 1.22+.
-
-```sh
-CODEX_PROXY_BIFROST_TEST=1 \
-  go test -race -run '^TestBifrostCompatibility$' -v -timeout 10m ./internal/proxy
-```
-
-Opt-in live verification uses installed credentials:
-
-```sh
-CODEX_PROXY_MANAGEMENT_LIVE_TEST=1 \
-  go test -race -run '^TestManagementLive$' -v -timeout 2m ./internal/proxy
-CODEX_PROXY_LIVE_TEST=1 CODEX_PROXY_TEST_CODEX=1 \
-  go test -race -run '^TestLiveProxy$' -v -timeout 5m ./internal/proxy
-CODEX_PROXY_BIFROST_LIVE_TEST=1 \
-  go test -race -run '^TestBifrostLive$' -v -timeout 10m ./internal/proxy
-```
-
-Inference tests consume account quota. Override their `gpt-5.5` default with
-`CODEX_PROXY_TEST_MODEL`. OAuth login/account switches are tested against a fake
-provider: automated tests never log out or replace your real account.
-
-## Layout
-
-```text
-cmd/codex-proxy/      CLI entry point
-internal/config/     flags, environment, validation
-internal/oauth/      Codex credentials, refresh, PKCE login, account replacement
-internal/proxy/      runtime, routing, Responses normalization and SSE
-internal/quota/      provider quota fetching and native window normalization
-internal/status/     polling, persistent history, filtering and pagination
-internal/storage/    private atomic files and cross-process locks
-docs/                API, configuration, deployment, architecture and references
-examples/            Codex and Bifrost configurations
-scripts/             local verification
-integration/bifrost/ isolated real-provider conformance tests
-```
-
-This follows Antigravity Proxy's package organization, without importing its
-Google-specific authentication, quota pools, or Gemini transformations. Reference
-checkouts and binaries remain ignored by Git.
