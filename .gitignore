@@ -4,6 +4,7 @@
 /codex-proxy
 /coverage.out
 .env
+*.env
 .env.*
 !.env.example
 # Credentials and runtime state must never be committed.

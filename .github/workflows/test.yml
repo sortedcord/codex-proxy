@@ -87,6 +87,26 @@ jobs:
           docker stop --time 30 codex-proxy-smoke
           test "$(docker inspect -f '{{.State.ExitCode}}' codex-proxy-smoke)" = 0
 
+  systemd:
+    name: systemd (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - run: ./scripts/build.sh
+      - name: Verify unit and smoke test the systemd sandbox
+        run: |
+          systemd-analyze --version
+          sudo python3 scripts/test-systemd.py ./bin/codex-proxy
+
   bifrost:
     runs-on: ubuntu-latest
     steps:
