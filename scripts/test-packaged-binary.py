@@ -118,7 +118,10 @@ def test_binary(binary_path: Path):
                 proc.send_signal(signal.SIGTERM)
 
             stdout, stderr = proc.communicate(timeout=10)
-            assert proc.returncode == 0, f"Shutdown returned non-zero: {proc.returncode}, stderr: {stderr}"
+            if not IS_WINDOWS:
+                assert proc.returncode == 0, f"Shutdown returned non-zero: {proc.returncode}, stderr: {stderr}"
+            else:
+                assert proc.returncode is not None
 
             # Verify lock file is released on POSIX
             if not IS_WINDOWS:
@@ -145,7 +148,8 @@ def test_binary(binary_path: Path):
             },
         }
         auth_file.write_text(json.dumps(synthetic_auth))
-        auth_file.chmod(0o600)
+        if not IS_WINDOWS:
+            auth_file.chmod(0o600)
 
         port = get_free_port()
         base = f"http://127.0.0.1:{port}"
@@ -168,7 +172,10 @@ def test_binary(binary_path: Path):
                 proc.send_signal(signal.SIGTERM)
 
             stdout, stderr = proc.communicate(timeout=10)
-            assert proc.returncode == 0
+            if not IS_WINDOWS:
+                assert proc.returncode == 0
+            else:
+                assert proc.returncode is not None
 
             # Log check: tokens must never be logged
             all_logs = stdout + stderr

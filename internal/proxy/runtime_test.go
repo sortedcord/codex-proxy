@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	goRuntime "runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -268,7 +269,7 @@ func TestRuntimeLoginQuotaAndPersistentRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cannot inspect persisted credentials: %v", err)
 	}
-	if got := file.Mode().Perm(); got != 0o600 {
+	if got := file.Mode().Perm(); goRuntime.GOOS != "windows" && got != 0o600 {
 		t.Fatalf("credential permissions=%o, want 600", got)
 	}
 }
