@@ -54,7 +54,7 @@ jobs:
           ./scripts/package-snapshot.sh
 
       - name: Publish binaries via GoReleaser
-        uses: goreleaser/goreleaser-action@90a305fe32ea55e12d9302e171b3127814b745ee # v6
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           distribution: goreleaser
           version: '~> v2'
