@@ -56,8 +56,8 @@ func ParseQuery(raw string) (Query, error) {
 			}
 			query.Pool = value
 		case "window":
-			if value != "all" && value != "primary" && value != "secondary" {
-				return query, errors.New("window must be all, primary or secondary")
+			if value != "all" && value != "5h" && value != "five_hour" && value != "weekly" && value != "primary" && value != "secondary" {
+				return query, errors.New("window must be all, 5h, weekly, primary or secondary")
 			}
 			query.Window = value
 		case "limit", "offset":
@@ -106,16 +106,16 @@ func queryHistory(samples []quota.Snapshot, query Query) Result {
 				continue
 			}
 			switch query.Window {
-			case "primary":
-				if pool.Primary == nil {
+			case "5h", "five_hour", "primary":
+				if pool.FiveHour == nil {
 					continue
 				}
-				pool.Secondary = nil
-			case "secondary":
-				if pool.Secondary == nil {
+				pool.Weekly = nil
+			case "weekly", "secondary":
+				if pool.Weekly == nil {
 					continue
 				}
-				pool.Primary = nil
+				pool.FiveHour = nil
 			}
 			pools[id] = pool
 		}

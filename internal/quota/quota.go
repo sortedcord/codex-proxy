@@ -27,8 +27,8 @@ type Limit struct {
 	DisplayName  string  `json:"display_name"`
 	Allowed      *bool   `json:"allowed"`
 	LimitReached *bool   `json:"limit_reached"`
-	Primary      *Window `json:"primary"`
-	Secondary    *Window `json:"secondary"`
+	FiveHour     *Window `json:"five_hour"`
+	Weekly       *Window `json:"weekly"`
 }
 
 type Credits struct {
@@ -180,11 +180,11 @@ func normalizeLimit(id, name string, input *wireLimit, observedAt time.Time) (Li
 	}
 	result.Allowed, result.LimitReached = input.Allowed, input.LimitReached
 	var err error
-	result.Primary, err = normalizeWindow(input.Primary, observedAt)
+	result.FiveHour, err = normalizeWindow(input.Primary, observedAt)
 	if err != nil {
 		return Limit{}, err
 	}
-	result.Secondary, err = normalizeWindow(input.Secondary, observedAt)
+	result.Weekly, err = normalizeWindow(input.Secondary, observedAt)
 	return result, err
 }
 

@@ -14,7 +14,7 @@ import (
 func testSample(account string, stamp time.Time) quota.Snapshot {
 	return quota.Snapshot{
 		AccountID: account, ObservedAt: stamp, Source: "wham/usage", Pools: map[string]quota.Limit{
-			"codex": {ID: "codex", DisplayName: "Codex", Primary: &quota.Window{
+			"codex": {ID: "codex", DisplayName: "Codex", FiveHour: &quota.Window{
 				UsedPercent: 12, RemainingPercent: 88, WindowSeconds: 18000,
 			}},
 		},
@@ -172,7 +172,7 @@ func TestHistoryRejectsSymlinksAndAccountMisattribution(t *testing.T) {
 func TestHistoryQueryFiltersAndStablePagination(t *testing.T) {
 	base := time.Now().UTC().Truncate(time.Second)
 	samples := []quota.Snapshot{testSample("a", base), testSample("a", base.Add(time.Second))}
-	query, err := ParseQuery("pool=codex&window=primary&limit=1&offset=1&order=desc")
+	query, err := ParseQuery("pool=codex&window=5h&limit=1&offset=1&order=desc")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestHistoryQueryFiltersAndStablePagination(t *testing.T) {
 		t.Fatalf("page timestamp = %s, want %s", result.Samples[0].ObservedAt, base)
 	}
 	for _, raw := range []string{
-		"limit=0", "limit=1001", "offset=-1", "window=5h", "order=random",
+		"limit=0", "limit=1001", "offset=-1", "window=invalid", "order=random",
 		"pool=a&pool=b", "unknown=1", "from=not-a-time",
 	} {
 		if _, err := ParseQuery(raw); err == nil {

@@ -25,31 +25,31 @@ func TestQuotaNativeWindowsAndFamilies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	primary := snapshot.Pools["codex"].Primary
-	if primary == nil {
-		t.Fatal("primary window missing")
+	fiveHour := snapshot.Pools["codex"].FiveHour
+	if fiveHour == nil {
+		t.Fatal("five_hour window missing")
 	}
-	if primary.RemainingPercent != 87.5 {
-		t.Fatalf("remaining percentage=%v, want 87.5", primary.RemainingPercent)
+	if fiveHour.RemainingPercent != 87.5 {
+		t.Fatalf("remaining percentage=%v, want 87.5", fiveHour.RemainingPercent)
 	}
-	if primary.WindowSeconds != 18000 {
-		t.Fatalf("window duration=%d, want 18000", primary.WindowSeconds)
+	if fiveHour.WindowSeconds != 18000 {
+		t.Fatalf("window duration=%d, want 18000", fiveHour.WindowSeconds)
 	}
-	if primary.ResetAt == nil {
-		t.Fatal("primary reset timestamp missing")
+	if fiveHour.ResetAt == nil {
+		t.Fatal("five_hour reset timestamp missing")
 	}
-	if want := now.Add(600 * time.Second); !primary.ResetAt.Equal(want) {
-		t.Fatalf("reset timestamp=%s, want %s", primary.ResetAt, want)
+	if want := now.Add(600 * time.Second); !fiveHour.ResetAt.Equal(want) {
+		t.Fatalf("reset timestamp=%s, want %s", fiveHour.ResetAt, want)
 	}
-	if snapshot.Pools["codex"].Secondary != nil {
+	if snapshot.Pools["codex"].Weekly != nil {
 		t.Fatal("missing weekly quota was fabricated")
 	}
 	extra := snapshot.Pools["codex_spark"]
-	if extra.Secondary == nil {
-		t.Fatal("additional secondary window missing")
+	if extra.Weekly == nil {
+		t.Fatal("additional weekly window missing")
 	}
-	if extra.Secondary.RemainingPercent != 0 {
-		t.Fatalf("additional remaining percentage=%v, want 0", extra.Secondary.RemainingPercent)
+	if extra.Weekly.RemainingPercent != 0 {
+		t.Fatalf("additional remaining percentage=%v, want 0", extra.Weekly.RemainingPercent)
 	}
 	if extra.Allowed == nil {
 		t.Fatal("additional allowed flag missing")

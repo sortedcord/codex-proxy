@@ -192,7 +192,7 @@ func (h *History) validate(sample quota.Snapshot) error {
 		if id == "" || id != pool.ID || len(id) > 128 || len(pool.DisplayName) > 256 {
 			return errors.New("invalid quota history family")
 		}
-		for _, window := range []*quota.Window{pool.Primary, pool.Secondary} {
+		for _, window := range []*quota.Window{pool.FiveHour, pool.Weekly} {
 			if window == nil {
 				continue
 			}

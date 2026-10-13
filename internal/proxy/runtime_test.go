@@ -233,7 +233,7 @@ func TestRuntimeLoginQuotaAndPersistentRestart(t *testing.T) {
 		t.Fatal("login response exposed a refresh token")
 	}
 	awaitQuota(t, runtime, "account-a")
-	for _, path := range []string{"/status/account", "/status/limit", "/status/usage?pool=codex&window=primary&limit=1"} {
+	for _, path := range []string{"/status/account", "/status/limit", "/status/usage?pool=codex&window=5h&limit=1"} {
 		response := managementRequest(
 			runtime,
 			"GET",

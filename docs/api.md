@@ -77,7 +77,7 @@ it does not synchronously contact OpenAI. It includes:
 - `observed_at`, `account_id`, `source`, optional hashed `identity_key`, `plan_type` and `credits`;
   the identity key separates users in the same workspace without exposing their user IDs;
 - `pools` keyed by provider metered-feature ID (`codex` plus reported extras);
-- each pool's `allowed`, `limit_reached`, nullable `primary` / `secondary` windows;
+- each pool's `allowed`, `limit_reached`, nullable `five_hour` / `weekly` windows;
 - reported `used_percent`, derived `remaining_percent`, `window_seconds`, nullable
   `reset_at`; missing windows are null, not fabricated five-hour/weekly allowances;
 - `polling.interval_seconds`, `last_attempt_at`, `last_success_at`, sanitized error;
@@ -95,7 +95,7 @@ The source is Codex's `/backend-api/wham/usage`, not local per-request counters.
 | --- | --- |
 | `from`, `to` | Optional inclusive RFC3339 timestamps with timezone |
 | `pool` | `all` (default) or reported pool ID such as `codex` |
-| `window` | `all` (default), `primary`, `secondary` |
+| `window` | `all` (default), `5h` / `five_hour`, `weekly` (also accepts legacy `primary`, `secondary`) |
 | `limit` | `1`–`1000`, default `100` |
 | `offset` | Non-negative integer, default `0` |
 | `order` | `asc` or `desc` (default), by observation timestamp |
