@@ -200,6 +200,52 @@ docker pull ghcr.io/sortedcord/codex-proxy@sha256:...
 
 Older maintenance releases will not regress `latest` if a newer stable release exists.
 
+### Docker Compose
+
+A ready-to-run, hardened Compose configuration is provided in [`deploy/compose.yaml`](../deploy/compose.yaml):
+
+```sh
+# 1. Copy the environment template
+cp deploy/.env.example deploy/.env
+chmod 600 deploy/.env
+
+# 2. Configure keys (CODEX_PROXY_API_KEY is required)
+# Generate secrets outside the repository, e.g. with `openssl rand -hex 32`
+editor deploy/.env
+
+# 3. Start the proxy
+docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
+
+# 4. Check health
+curl http://127.0.0.1:8081/health
+```
+
+The Compose definition encodes all security defaults:
+- **Non-root user**: runs as container UID/GID `10001:10001`.
+- **Read-only root filesystem**: `read_only: true`.
+- **Minimal privileges**: `cap_drop: [ALL]` and `no-new-privileges:true`.
+- **Loopback binding**: published on `127.0.0.1:8081:8080` by default.
+- **Persistent writable state**: separate named volumes for `/home/app/.codex` and
+  `/home/app/.local/share/codex-proxy`. Both volumes must remain writable for atomic
+  token rotation, the auth lock, and quota history.
+- **Required key enforcement**: Compose interpolation requires `CODEX_PROXY_API_KEY`.
+- **Graceful shutdown**: 30-second stop grace period ensures in-flight requests and
+  token refresh persistence complete before container termination.
+
+#### Upgrades and maintenance
+
+- To upgrade: `docker compose -f deploy/compose.yaml --env-file deploy/.env pull && docker compose -f deploy/compose.yaml --env-file deploy/.env up -d`.
+- **Never run `docker compose down -v` during upgrades**: the `-v` flag removes
+  persistent auth and quota volumes.
+- To back up state, stop the container first:
+  ```sh
+  docker compose -f deploy/compose.yaml --env-file deploy/.env stop
+  # Inspect or back up volume data while stopped
+  docker compose -f deploy/compose.yaml --env-file deploy/.env start
+  ```
+- No OAuth callback ports are published to the host. Complete runtime login via the
+  management API using external manual redirect completion.
+
 To build the image locally:
 
 ```sh
