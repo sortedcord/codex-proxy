@@ -5,7 +5,13 @@ COPY go.mod ./
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/codex-proxy ./cmd/codex-proxy \
+# Local builds use the embedded development version; CI supplies source identity.
+ARG VERSION
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X github.com/sortedcord/codex-proxy/internal/buildinfo.Version=${VERSION} -X github.com/sortedcord/codex-proxy/internal/buildinfo.Commit=${COMMIT} -X github.com/sortedcord/codex-proxy/internal/buildinfo.Date=${BUILD_DATE}" \
+    -o /out/codex-proxy ./cmd/codex-proxy \
     && mkdir -p /home/app/.codex /home/app/.local/share/codex-proxy \
     && chmod 0700 /home/app/.codex /home/app/.local/share/codex-proxy
 

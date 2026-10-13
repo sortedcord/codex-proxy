@@ -3,7 +3,8 @@
 Build the standard-library-only binary:
 
 ```sh
-go build -trimpath -ldflags='-s -w' -o bin/codex-proxy ./cmd/codex-proxy
+./scripts/build.sh
+./bin/codex-proxy version
 ```
 
 Run under a dedicated non-root user. Its credential directory must be writable for

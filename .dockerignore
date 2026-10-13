@@ -13,6 +13,10 @@ cmd/codex-proxy/*
 
 !internal/
 internal/*
+!internal/buildinfo/
+internal/buildinfo/*
+!internal/buildinfo/*.go
+!internal/buildinfo/VERSION
 !internal/config/
 internal/config/*
 !internal/config/*.go

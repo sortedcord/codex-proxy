@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sortedcord/codex-proxy/internal/buildinfo"
 	"github.com/sortedcord/codex-proxy/internal/config"
 )
 
@@ -59,7 +60,9 @@ func serve(ctx context.Context, ln net.Listener, handler http.Handler, logger *s
 			_ = server.Close()
 		}
 	}()
-	logger.Info("listening", "addr", ln.Addr().String())
+	identity := buildinfo.Current()
+	logger.Info("listening", "addr", ln.Addr().String(),
+		"version", identity.Version, "commit", identity.Commit, "date", identity.Date)
 	err := server.Serve(ln)
 	// A permanent accept error must wake the shutdown worker before joining it.
 	cancel()
