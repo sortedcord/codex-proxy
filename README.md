@@ -126,7 +126,9 @@ from then on, normal SemVer compatibility rules apply.
 Run `codex-proxy version` to print the executable version, commit, and date
 without loading credentials or starting the server. Local builds report
 `v0.5.0-dev`; tagged builds can inject release identity. This version is separate
-from the upstream Codex client version. See [versioning and build metadata](docs/versioning.md).
+from the upstream Codex client version. Automated Git tagging, changelogs, and
+release management are handled by [Release Please](https://github.com/googleapis/release-please)
+from Conventional Commits. See [versioning and release management](docs/versioning.md).
 
 ## Optional management
 
