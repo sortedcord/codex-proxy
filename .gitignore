@@ -1,6 +1,7 @@
 /reference-projects/
 /.codegraph/
 /bin/
+/dist/
 /codex-proxy
 /coverage.out
 .env

@@ -1,15 +1,28 @@
 # Deployment
 
-Build the standard-library-only binary:
+## Native binary
+
+Pre-compiled static binaries are published for Linux (`amd64`, `arm64`), macOS (`amd64`, `arm64`),
+and Windows (`amd64`) on [GitHub Releases](https://github.com/sortedcord/codex-proxy/releases).
+Each release includes SHA-256 checksums (`checksums.txt`).
+
+Alternatively, compile from source using the build script:
 
 ```sh
 ./scripts/build.sh
 ./bin/codex-proxy version
 ```
 
-Run under a dedicated non-root user. Its credential directory must be writable for
-OAuth refresh, runtime login and the process lock. Give its private history directory
-mode `0700` and keep keys outside the checkout. Start with environment variables:
+Or install via Go:
+
+```sh
+go install github.com/sortedcord/codex-proxy/cmd/codex-proxy@v0.5.0
+```
+
+To validate release packaging locally, run `./scripts/package-snapshot.sh` (builds
+and checks snapshot archives in `dist/`).
+
+### Service operation
 
 ```sh
 CODEX_PROXY_API_KEY="your-inference-key" \
