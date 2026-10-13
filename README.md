@@ -10,6 +10,40 @@ replacement without restarting. It does not route to the paid OpenAI developer A
 
 ## Quick start
 
+### 1. Download a pre-built binary
+
+Pre-compiled standalone binaries for Linux and macOS (AMD64 and ARM64) are published on
+the [GitHub Releases page](https://github.com/sortedcord/codex-proxy/releases).
+
+```sh
+# Example: Linux AMD64
+curl -fsSLO https://github.com/sortedcord/codex-proxy/releases/download/v0.5.0/codex-proxy_v0.5.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/sortedcord/codex-proxy/releases/download/v0.5.0/checksums.txt
+sha256sum --check --ignore-missing checksums.txt
+tar -xzf codex-proxy_v0.5.0_linux_amd64.tar.gz
+./codex-proxy version
+./codex-proxy serve
+```
+
+Alternatively, install via Go:
+
+```sh
+go install github.com/sortedcord/codex-proxy/cmd/codex-proxy@v0.5.0
+```
+
+### 2. Run with Docker Compose
+
+A hardened, non-root Compose configuration is available in [`deploy/compose.yaml`](deploy/compose.yaml):
+
+```sh
+cp deploy/.env.example deploy/.env && chmod 600 deploy/.env
+# Set CODEX_PROXY_API_KEY in deploy/.env
+docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
+curl http://127.0.0.1:8081/health
+```
+
+### 3. Build from source
+
 Requires **Go 1.22+**:
 
 ```sh
@@ -80,16 +114,7 @@ The image listens on `0.0.0.0:8080`, so **`CODEX_PROXY_API_KEY` is required**.
 See [Docker deployment](docs/deployment.md#docker) for persistent writable credential/
 history mounts, a read-only root filesystem, and container OAuth login.
 
-#### Docker Compose
-
-A hardened configuration is available in [`deploy/compose.yaml`](deploy/compose.yaml):
-
-```sh
-cp deploy/.env.example deploy/.env && chmod 600 deploy/.env
-# Edit deploy/.env to supply CODEX_PROXY_API_KEY (required)
-docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
-curl http://127.0.0.1:8081/health
-```
+For Compose deployments, see [Quick start: Docker Compose](#2-run-with-docker-compose) and [detailed Compose deployment](docs/deployment.md#docker-compose).
 
 ## Versioning
 
