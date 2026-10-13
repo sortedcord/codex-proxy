@@ -26,6 +26,26 @@ Update the baseline in the same reviewed change as a version bump. Create the
 matching tag only after approval/merge. Adding version identification does not
 itself publish a release or create a tag.
 
+## Automated releases with Release Please
+
+Releases and Git tags are managed automatically by [Release Please](https://github.com/googleapis/release-please):
+
+1. **Write Conventional Commits**: When opening pull requests or merging commits into `main`,
+   use Conventional Commit prefixes:
+   - `feat:` triggers a minor release bump in the v0 phase (`v0.5.0` → `v0.6.0`).
+   - `fix:` triggers a patch release bump in the v0 series (`v0.5.0` → `v0.5.1`).
+   - Other types (`docs:`, `perf:`, `chore:`, `refactor:`) update release notes without a version bump.
+2. **Release PR**: On pushes to `main`, Release Please updates or creates a dedicated
+   Release PR (e.g. `chore: release 0.5.1`) that updates `CHANGELOG.md` and `internal/buildinfo/VERSION`.
+3. **Triggering a Release**: Whenever the maintainer is ready to release, simply review and
+   merge the Release PR into `main`. Merging it will:
+   - Create the corresponding Git tag (e.g. `v0.5.1`).
+   - Create the GitHub Release with formatted changelog notes.
+   - Run GoReleaser to compile static binaries (Linux, macOS, Windows) and upload checksummed archives.
+   - Build and publish multi-arch Docker container images to GHCR.
+4. **Manual Fallback**: Pushing a manual tag (`git tag v0.5.1 && git push origin v0.5.1`) triggers
+   the direct `.github/workflows/release.yml` and `.github/workflows/docker.yml` workflows.
+
 ## Inspecting a build
 
 ```sh
