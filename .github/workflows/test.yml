@@ -87,6 +87,66 @@ jobs:
           docker stop --time 30 codex-proxy-smoke
           test "$(docker inspect -f '{{.State.ExitCode}}' codex-proxy-smoke)" = 0
 
+  deploy-examples:
+    name: Validate Compose & container tag rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Validate container tag rules
+        run: python3 scripts/test-docker-tags.py
+      - name: Validate Compose interpolation and security configuration
+        run: python3 scripts/test-compose.py
+      - name: Validate Compose with docker compose config
+        run: |
+          echo "CODEX_PROXY_API_KEY=ci-dummy-key" > deploy/.env
+          docker compose -f deploy/compose.yaml --env-file deploy/.env config
+          rm -f deploy/.env
+
+  release-artifacts:
+    name: Package and verify release archives
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Package snapshot archives and verify artifact hygiene
+        run: ./scripts/package-snapshot.sh
+
+  native-platforms:
+    name: Platform validation (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Validate platform storage and lifecycle (Unix)
+        if: runner.os == 'macOS'
+        run: |
+          ./scripts/build.sh
+          python3 scripts/test-packaged-binary.py ./bin/codex-proxy
+      - name: Validate platform storage and lifecycle (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          go test -v ./internal/storage
+          go build -trimpath -o codex-proxy.exe ./cmd/codex-proxy
+          python scripts/test-packaged-binary.py ./codex-proxy.exe
+
   systemd:
     name: systemd (${{ matrix.os }})
     strategy:
