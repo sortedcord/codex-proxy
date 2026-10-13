@@ -176,7 +176,31 @@ nor enables the production service. CI runs it on Ubuntu 22.04 and 24.04.
 
 ## Docker
 
-Build the local image:
+Pre-built multi-arch images (`linux/amd64`, `linux/arm64`) are published to GitHub
+Container Registry at `ghcr.io/sortedcord/codex-proxy`.
+
+For production deployments, pin an exact release version or image digest:
+
+```sh
+# Pinned stable release:
+docker pull ghcr.io/sortedcord/codex-proxy:0.5.0
+
+# Or immutable digest:
+docker pull ghcr.io/sortedcord/codex-proxy@sha256:...
+```
+
+### Container release channels
+
+- **`0.5.0` (or `v0.5.0`)**: Exact, immutable release build.
+- **`0.5`**: Moving minor alias for the latest patch release in the 0.5 series.
+- **`latest`**: Tracks the most recent stable release. Never updated by pushes to `main`
+  or prerelease tags.
+- **`main`**: Bleeding-edge development image published on pushes to `main`.
+- **`sha-<commit>`**: Commit-addressed immutable image for any pushed commit.
+
+Older maintenance releases will not regress `latest` if a newer stable release exists.
+
+To build the image locally:
 
 ```sh
 docker build -t codex-proxy .

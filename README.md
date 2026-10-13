@@ -43,13 +43,29 @@ The [Docker image workflow](.github/workflows/docker.yml) publishes images to
 formatting, vet, and race tests pass:
 
 ```sh
+# Pinned stable release (recommended):
+docker pull ghcr.io/sortedcord/codex-proxy:0.5.0
+
+# Or moving stable alias:
 docker pull ghcr.io/sortedcord/codex-proxy:latest
 ```
 
-Pushes to `main` publish `main`, `latest`, and `sha-<full-commit>` tags. Version
-pushes such as `v1.2.3` publish `1.2.3`, `1.2`, and `1` tags (stable releases also
-update `latest`). Pull requests targeting `main` build both platforms without
-logging in or publishing. The workflow also supports manual runs and uses the
+### Container release channels
+
+| Tag | Channel | Description |
+| --- | --- | --- |
+| `0.5.0` (or `v0.5.0`) | Specific release | Immutable release build |
+| `0.5` | Minor alias | Moving alias for the latest patch in the 0.5 series |
+| `latest` | Stable alias | Tracks the most recent stable release (never updated by main or prereleases) |
+| `main` | Development | Bleeding-edge build from the default branch |
+| `sha-<commit>` | Commit build | Immutable build for an exact commit |
+
+Pushes to `main` publish only `main` and `sha-<full-commit>` tags (never `latest`).
+Pushes of stable version tags such as `v0.5.0` publish `0.5.0`, `0.5`, and `latest`.
+Prerelease tags such as `v0.6.0-rc.1` publish only their exact tag and do not update
+`latest` or minor aliases. For immutable production deployments, pin an exact version
+or image digest (`@sha256:...`). Pull requests targeting `main` build both platforms
+without logging in or publishing. The workflow also supports manual runs and uses the
 built-in `GITHUB_TOKEN`; no separate registry secret is required. For anonymous
 pulls, set the GHCR package visibility to **public** after its first publication.
 
