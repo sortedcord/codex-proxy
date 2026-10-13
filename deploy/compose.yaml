@@ -1,0 +1,30 @@
+services:
+  codex-proxy:
+    image: ${CODEX_PROXY_IMAGE:-ghcr.io/sortedcord/codex-proxy:0.5.0}
+    container_name: codex-proxy
+    restart: unless-stopped
+    read_only: true
+    user: "10001:10001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "${CODEX_PROXY_BIND_ADDR:-127.0.0.1:8081}:8080"
+    environment:
+      # Inference key is required for non-loopback container listeners.
+      CODEX_PROXY_API_KEY: ${CODEX_PROXY_API_KEY:?CODEX_PROXY_API_KEY is required for container deployments}
+      # Empty disables management; setting a distinct key enables status/login.
+      CODEX_PROXY_MANAGEMENT_KEY: ${CODEX_PROXY_MANAGEMENT_KEY:-}
+    stop_grace_period: 30s
+    volumes:
+      - type: volume
+        source: codex-proxy-auth
+        target: /home/app/.codex
+      - type: volume
+        source: codex-proxy-history
+        target: /home/app/.local/share/codex-proxy
+
+volumes:
+  codex-proxy-auth:
+  codex-proxy-history:

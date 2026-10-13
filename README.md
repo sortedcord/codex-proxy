@@ -80,6 +80,17 @@ The image listens on `0.0.0.0:8080`, so **`CODEX_PROXY_API_KEY` is required**.
 See [Docker deployment](docs/deployment.md#docker) for persistent writable credential/
 history mounts, a read-only root filesystem, and container OAuth login.
 
+#### Docker Compose
+
+A hardened configuration is available in [`deploy/compose.yaml`](deploy/compose.yaml):
+
+```sh
+cp deploy/.env.example deploy/.env && chmod 600 deploy/.env
+# Edit deploy/.env to supply CODEX_PROXY_API_KEY (required)
+docker compose -f deploy/compose.yaml --env-file deploy/.env up -d
+curl http://127.0.0.1:8081/health
+```
+
 ## Versioning
 
 The current baseline is **v0.5.0**. During stabilization, feature releases use
