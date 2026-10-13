@@ -23,6 +23,157 @@ supply a private environment file; never commit that file. SIGINT/SIGTERM drain 
 requests for ten seconds before closing remaining connections. Refresh completion is
 joined so rotated tokens are not abandoned. Login/polling workers and locks are closed.
 
+## systemd (Linux)
+
+The packaged [`codex-proxy.service`](../deploy/systemd/codex-proxy.service) targets
+**systemd 249+** (Ubuntu 22.04 or newer). CI exercises Ubuntu 22.04/24.04; the unit
+also has a local runtime smoke test on systemd 262. Other distributions must provide
+systemd's usual namespace/sandbox support; restricted containers may not support it.
+It is a system service, not a `systemctl --user` unit.
+
+### Install and configure
+
+Build or obtain a trusted native binary, then install the binary and unit as root:
+
+```sh
+./scripts/build.sh
+sudo install -o root -g root -m 0755 bin/codex-proxy /usr/local/bin/codex-proxy
+sudo install -o root -g root -m 0644 deploy/systemd/codex-proxy.service \
+  /etc/systemd/system/codex-proxy.service
+sudo install -d -o root -g root -m 0700 /etc/codex-proxy
+# First install only: do not overwrite an existing configuration during upgrades.
+sudo install -o root -g root -m 0600 deploy/systemd/codex-proxy.env.example \
+  /etc/codex-proxy/codex-proxy.env
+sudoedit /etc/codex-proxy/codex-proxy.env
+```
+
+The configuration uses **systemd EnvironmentFile syntax**, not shell syntax: no
+`export`, command substitution, or inline comments. Generate private random keys
+(for example, with `openssl rand -hex 32`) outside this repository and place them in
+the installed file, never in the unit, command arguments, or committed template.
+Keys in the process environment are accessible to trusted root administrators; this
+is not a secret store that protects against root. Real `*.env` files are ignored.
+
+The template binds to **127.0.0.1:8081**. Its empty inference key is valid for
+loopback-only use; set a key to protect inference even locally. An empty management
+key disables management, login, polling, and history. Enable browser login/status
+by supplying a **different** management key. Changing to a non-loopback address
+requires an inference key **and** TLS plus a firewall or encrypted tunnel. Keep
+management endpoints restricted to administrators. Restart after editing the file.
+
+```sh
+sudo systemd-analyze verify /etc/systemd/system/codex-proxy.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now codex-proxy.service
+sudo systemctl status codex-proxy.service
+curl --fail http://127.0.0.1:8081/health
+sudo journalctl -u codex-proxy.service -n 50 --no-pager
+/usr/local/bin/codex-proxy version
+```
+
+### Account and persistent state
+
+`DynamicUser=yes` lets systemd allocate a dedicated **non-root, non-login** account;
+there is no `useradd` step or dependency on an operator's home. `StateDirectory`
+creates and manages `/var/lib/codex-proxy` with mode **0700**. Under DynamicUser,
+systemd stores it below `/var/lib/private` and exposes it through a managed symlink;
+do not replace that link, hard-code a numeric UID, or manually chown it to a
+previously allocated UID. Ownership/id mapping is managed across restarts.
+
+The unit fixes these paths with command-line flags:
+
+- Credentials: `/var/lib/codex-proxy/auth/auth.json`.
+- History: `/var/lib/codex-proxy/history`.
+- Auth/history process locks live beside their state and remain after clean exit.
+
+The root-owned executable/configuration and system filesystem are not writable by
+the service. Only its persistent state and private temporary storage are writable.
+Credential directories remain writable for atomic replacement and directory sync;
+never bind-mount only `auth.json` or make the credential directory read-only.
+Changing these paths requires a reviewed unit override, not environment values
+(the command-line flags take precedence).
+
+A clean installation starts **without credentials**. Health succeeds; inference
+returns `503` for authenticated requests until an account is configured. With the
+management key enabled, begin runtime browser login using the existing
+[management instructions](../README.md#runtime-browser-login-and-hot-switching).
+For a remote host, use [manual redirect completion or an SSH callback tunnel](#remote-and-container-login).
+Do not expose callback ports 1455/1457 publicly. Login writes this dedicated service
+state, not the operator's `~/.codex/auth.json`. Do not run another token-refreshing
+Codex process against the service credential file.
+
+### Sandboxing and shutdown
+
+The unit uses `ProtectSystem=strict`, `ProtectHome`, private temporary/device
+namespaces, `NoNewPrivileges`, empty capability sets, kernel/control-group
+protection, and restrictions on setuid and personality changes. It allows UNIX,
+IPv4, and IPv6 sockets for DNS, outbound HTTPS, inference, and loopback callbacks;
+it deliberately does **not** use `PrivateNetwork` or an unvalidated syscall filter.
+StateDirectory is automatically writable despite filesystem protection. If sandbox
+setup fails on a restricted host, fix the host support or deliberately review an
+override; do not silently disable the hardening.
+
+Failures restart after five seconds, limited to five starts per minute so invalid
+configuration does not loop indefinitely. After fixing a failed configuration:
+
+```sh
+sudo systemctl reset-failed codex-proxy.service
+sudo systemctl start codex-proxy.service
+```
+
+SIGTERM drains HTTP requests for up to ten seconds and joins bounded OAuth
+persistence workers. `TimeoutStopSec=90s` allows that work to complete before
+systemd's forced termination. A normal `systemctl stop` does not trigger restart.
+
+### Upgrade, backup, and rollback
+
+Stop the service before backups, credential import, or recovery. Backups contain
+sensitive credentials/private operational state: keep them root-only, outside the
+checkout, and never upload them to CI or issue attachments. Do not remove live lock
+files. A stopped service does not need lock-file deletion before restart.
+
+Example on a trusted host (choose a new private backup filename each time):
+
+```sh
+sudo systemctl stop codex-proxy.service
+sudo install -d -o root -g root -m 0700 /var/backups/codex-proxy
+# -C through the state symlink backs up the actual contents, not just the link.
+sudo sh -c 'umask 077; tar -C /var/lib/codex-proxy -czf /var/backups/codex-proxy/state-before-upgrade.tar.gz .'
+sudo install -o root -g root -m 0755 /usr/local/bin/codex-proxy \
+  /var/backups/codex-proxy/codex-proxy.previous
+sudo install -o root -g root -m 0755 bin/codex-proxy /usr/local/bin/codex-proxy
+/usr/local/bin/codex-proxy version
+# Install updated unit if needed, but retain the private environment file.
+sudo systemctl daemon-reload
+sudo systemctl start codex-proxy.service
+curl --fail http://127.0.0.1:8081/health
+sudo journalctl -u codex-proxy.service -n 50 --no-pager
+```
+
+To roll back the executable, stop the service, reinstall `codex-proxy.previous` as
+`/usr/local/bin/codex-proxy`, then start and check it. Review release notes for state
+format compatibility first. **Do not routinely restore old auth files**: refresh
+tokens may have rotated since the backup and old tokens can be invalid. Keep the
+current auth state when rolling back a compatible executable; use fresh login if
+credentials need recovery. DEB/RPM package installation is not included here.
+
+### Test the packaged unit
+
+On a disposable systemd host with Python 3 and root access:
+
+```sh
+./scripts/build.sh
+sudo python3 scripts/test-systemd.py ./bin/codex-proxy
+```
+
+This opt-in test verifies a temporary copy of the shipped unit, changing only its
+account, executable/configuration/state paths and adding an in-sandbox probe. It
+uses dummy keys and no live credentials, checks non-root execution, private atomic
+state writes, filesystem/capability restrictions, loopback OAuth callback binding,
+authentication, graceful stop, released locks, and persistent state across starts.
+It removes only its own temporary unit/state after stopping. It neither installs
+nor enables the production service. CI runs it on Ubuntu 22.04 and 24.04.
+
 ## Docker
 
 Build the local image:

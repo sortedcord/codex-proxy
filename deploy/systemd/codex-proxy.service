@@ -1,0 +1,42 @@
+[Unit]
+Description=Codex Responses API proxy
+Documentation=https://github.com/sortedcord/codex-proxy/blob/main/docs/deployment.md#systemd-linux
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+# systemd allocates a non-login account and manages persistent state ownership.
+DynamicUser=yes
+User=codex-proxy
+StateDirectory=codex-proxy
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/codex-proxy
+Environment=HOME=/var/lib/codex-proxy
+Environment=CODEX_PROXY_ADDR=127.0.0.1:8081
+EnvironmentFile=/etc/codex-proxy/codex-proxy.env
+ExecStart=/usr/local/bin/codex-proxy serve -auth-file /var/lib/codex-proxy/auth/auth.json -history-dir /var/lib/codex-proxy/history
+Restart=on-failure
+RestartSec=5s
+# Allow HTTP draining and bounded OAuth persistence workers to finish.
+TimeoutStopSec=90s
+UMask=0077
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

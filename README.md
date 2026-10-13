@@ -239,7 +239,8 @@ by Codex are ignored. See [API details](docs/api.md).
 
 For more details:
 - [Configuration](docs/configuration.md) — full flag and environment reference
-- [Deployment](docs/deployment.md) — remote setup and process management
+- [Deployment](docs/deployment.md) — remote setup and process management, including
+  a [hardened systemd service](docs/deployment.md#systemd-linux) for native Linux installs
 - [Architecture](docs/architecture.md) — internal design and lifecycles
 - [API Reference](docs/api.md) — endpoints and payloads
 
