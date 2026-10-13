@@ -107,16 +107,8 @@ if [ -f "$host_archive" ]; then
     exit 1
   fi
 
-  # Execute and verify version output
-  output=$("$test_extract/codex-proxy" version)
-  printf 'Packaged binary output: %s\n' "$output"
-  case "$output" in
-    *"codex-proxy $version"*) ;;
-    *)
-      printf 'Unexpected version output: %s\n' "$output" >&2
-      exit 1
-      ;;
-  esac
+  # Execute and verify version output and full lifecycle smoke test
+  python3 scripts/test-packaged-binary.py "$test_extract/codex-proxy"
   rm -rf "$test_extract"
   trap - EXIT
 fi

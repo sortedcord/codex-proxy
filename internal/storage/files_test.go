@@ -3,6 +3,7 @@ package storage
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ func TestAtomicPrivateFileAndLifetimeLock(t *testing.T) {
 		t.Fatal("replacement failed")
 	}
 	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatal("file is not private")
 	}
 	lock, err := Acquire(path + ".lock")

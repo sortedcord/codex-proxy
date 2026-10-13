@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -97,7 +98,7 @@ func TestHistoryRetentionDurabilityAndIdentity(t *testing.T) {
 		t.Fatalf("oldest timestamp = %s, want %s", samples[0].ObservedAt, base.Add(2*time.Second))
 	}
 	info, _ := os.Stat(HistoryPath(dir, "account-a"))
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatal("journal is not private")
 	}
 	if HistoryPath(dir, "account-a") == HistoryPath(dir, "account-b") {
