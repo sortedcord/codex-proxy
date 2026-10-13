@@ -25,7 +25,11 @@ jobs:
         run: test -z "$(gofmt -l cmd internal integration/bifrost)"
       - run: go vet ./...
       - run: go test -race -cover ./...
-      - run: go build -trimpath -ldflags='-s -w' -o bin/codex-proxy ./cmd/codex-proxy
+      - run: ./scripts/build.sh
+      - name: Check injected build identity
+        run: |
+          expected="codex-proxy $(tr -d '\n\r' < internal/buildinfo/VERSION)-dev (commit=$(git rev-parse HEAD), date=$(git show -s --format=%cI HEAD))"
+          test "$(./bin/codex-proxy version)" = "$expected"
 
   lint:
     runs-on: ubuntu-latest

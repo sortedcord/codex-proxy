@@ -20,7 +20,7 @@ func TestCLIValidServeHonorsCancellation(t *testing.T) {
 		"serve", "-addr", "127.0.0.1:0",
 		"-auth-file", filepath.Join(dir, "auth.json"),
 		"-history-dir", filepath.Join(dir, "history"),
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)), io.Discard)
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), io.Discard, io.Discard)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("valid serve command = %v, want cancellation", err)
 	}

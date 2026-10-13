@@ -14,8 +14,8 @@ Requires **Go 1.22+**:
 
 ```sh
 codex login                           # optional if using runtime login below
-mkdir -p bin
-go build -trimpath -ldflags='-s -w' -o bin/codex-proxy ./cmd/codex-proxy
+./scripts/build.sh
+./bin/codex-proxy version
 ./bin/codex-proxy serve               # 127.0.0.1:8080; bare invocation also works
 ```
 
@@ -63,6 +63,18 @@ docker build -t codex-proxy .
 The image listens on `0.0.0.0:8080`, so **`CODEX_PROXY_API_KEY` is required**.
 See [Docker deployment](docs/deployment.md#docker) for persistent writable credential/
 history mounts, a read-only root filesystem, and container OAuth login.
+
+## Versioning
+
+The current baseline is **v0.5.0**. During stabilization, feature releases use
+`v0.x.0` and fixes/small updates increment the patch within that series (for
+example, `v0.5.1`). The maintainer decides when to promote the project to v1;
+from then on, normal SemVer compatibility rules apply.
+
+Run `codex-proxy version` to print the executable version, commit, and date
+without loading credentials or starting the server. Local builds report
+`v0.5.0-dev`; tagged builds can inject release identity. This version is separate
+from the upstream Codex client version. See [versioning and build metadata](docs/versioning.md).
 
 ## Optional management
 
