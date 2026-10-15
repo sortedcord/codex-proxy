@@ -4,6 +4,10 @@ set -eu
 cd "$(dirname "$0")/.."
 
 base_version=$(tr -d '\n\r' < internal/buildinfo/VERSION)
+case "$base_version" in
+  v*) ;;
+  *) base_version="v$base_version" ;;
+esac
 version=${VERSION:-${base_version}-dev}
 commit=${COMMIT:-$(git rev-parse HEAD 2>/dev/null || printf unknown)}
 if [ -z "${COMMIT:-}" ] && [ -n "$(git status --porcelain 2>/dev/null)" ]; then

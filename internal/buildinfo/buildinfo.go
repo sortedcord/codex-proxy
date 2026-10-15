@@ -34,7 +34,11 @@ func Current() Info {
 func resolve(build *debug.BuildInfo) Info {
 	info := Info{Version: Version, Commit: Commit, Date: Date}
 	if info.Version == "" {
-		info.Version = strings.TrimSpace(baseVersion) + "-dev"
+		v := strings.TrimSpace(baseVersion)
+		if !strings.HasPrefix(v, "v") {
+			v = "v" + v
+		}
+		info.Version = v + "-dev"
 		if build != nil && build.Main.Version != "" && build.Main.Version != "(devel)" {
 			info.Version = build.Main.Version
 		}

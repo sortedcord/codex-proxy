@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      go:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "gomod"
+    directory: "/integration/bifrost"
+    schedule:
+      interval: "weekly"
+    groups:
+      bifrost:
+        patterns:
+          - "*"

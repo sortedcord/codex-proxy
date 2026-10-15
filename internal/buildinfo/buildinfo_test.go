@@ -14,31 +14,31 @@ func TestResolve(t *testing.T) {
 		build    *debug.BuildInfo
 		want     Info
 	}{
-		{name: "development", want: Info{Version: "v0.5.0-dev", Commit: "unknown", Date: "unknown"}},
+		{name: "development", want: Info{Version: "v0.6.0-dev", Commit: "unknown", Date: "unknown"}},
 		{
 			name: "module and vcs",
-			build: &debug.BuildInfo{Main: debug.Module{Version: "v0.5.1"}, Settings: []debug.BuildSetting{
+			build: &debug.BuildInfo{Main: debug.Module{Version: "v0.6.1"}, Settings: []debug.BuildSetting{
 				{Key: "vcs.revision", Value: "abc123"}, {Key: "vcs.time", Value: "2026-10-13T00:00:00Z"},
 			}},
-			want: Info{Version: "v0.5.1", Commit: "abc123", Date: "2026-10-13T00:00:00Z"},
+			want: Info{Version: "v0.6.1", Commit: "abc123", Date: "2026-10-13T00:00:00Z"},
 		},
 		{
-			name: "injected wins", injected: Info{Version: "v0.5.0", Commit: "release", Date: "date"},
+			name: "injected wins", injected: Info{Version: "v0.6.0", Commit: "release", Date: "date"},
 			build: &debug.BuildInfo{Main: debug.Module{Version: "v0.1.0"}, Settings: []debug.BuildSetting{
 				{Key: "vcs.revision", Value: "other"}, {Key: "vcs.time", Value: "other"},
 			}},
-			want: Info{Version: "v0.5.0", Commit: "release", Date: "date"},
+			want: Info{Version: "v0.6.0", Commit: "release", Date: "date"},
 		},
 		{
 			name: "devel module", build: &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}},
-			want: Info{Version: "v0.5.0-dev", Commit: "unknown", Date: "unknown"},
+			want: Info{Version: "v0.6.0-dev", Commit: "unknown", Date: "unknown"},
 		},
 		{
 			name: "dirty checkout",
 			build: &debug.BuildInfo{Settings: []debug.BuildSetting{
 				{Key: "vcs.revision", Value: "abc123"}, {Key: "vcs.modified", Value: "true"},
 			}},
-			want: Info{Version: "v0.5.0-dev", Commit: "abc123-dirty", Date: "unknown"},
+			want: Info{Version: "v0.6.0-dev", Commit: "abc123-dirty", Date: "unknown"},
 		},
 	}
 	for _, tt := range tests {
@@ -52,8 +52,8 @@ func TestResolve(t *testing.T) {
 }
 
 func TestString(t *testing.T) {
-	info := Info{Version: "v0.5.0", Commit: "abc123", Date: "2026-10-13T00:00:00Z"}
-	if got := info.String(); got != "codex-proxy v0.5.0 (commit=abc123, date=2026-10-13T00:00:00Z)" {
+	info := Info{Version: "v0.6.0", Commit: "abc123", Date: "2026-10-13T00:00:00Z"}
+	if got := info.String(); got != "codex-proxy v0.6.0 (commit=abc123, date=2026-10-13T00:00:00Z)" {
 		t.Fatalf("unexpected output: %s", got)
 	}
 }

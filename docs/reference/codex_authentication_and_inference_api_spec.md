@@ -6,7 +6,7 @@ This specification provides a comprehensive, production-grade architectural and 
 
 ## Table of Contents
 
-- [Codex Authentication and Inference API Specification](#codex-authentication-and-inference-api-spec)
+- [Codex Authentication and Inference API Specification](#codex-authentication-and-inference-api-specification)
   - [Table of Contents](#table-of-contents)
   - [Executive Architectural Overview](#1-executive-architectural-overview)
   - [Part I: Codex Authentication Architecture](#part-i-codex-authentication-architecture)

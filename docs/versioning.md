@@ -1,6 +1,6 @@
 # Versioning and executable identity
 
-The current version baseline is **v0.5.0** (the SemVer spelling of v0.5).
+The current version baseline is **v0.6.0** (the SemVer spelling of v0.6).
 `internal/buildinfo/VERSION` is the source of truth for the baseline. Go module
 language requirements and the upstream Codex client compatibility version are
 independent of this application version.
@@ -10,9 +10,9 @@ independent of this application version.
 Use SemVer `MAJOR.MINOR.PATCH`, with a `v` prefix on Git tags:
 
 - During the v0 phase, major feature updates increment MINOR and reset PATCH:
-  `v0.5.0` → `v0.6.0`.
+  `v0.6.0` → `v0.7.0`.
 - Fixes and small updates increment PATCH within the current feature series:
-  `v0.5.0` → `v0.5.1`. Do not reset the minor number to zero for patch releases.
+  `v0.6.0` → `v0.6.1`. Do not reset the minor number to zero for patch releases.
 - v0 is a stabilization phase; compatibility is not yet promised. Document
   breaking changes explicitly in release notes, preferably in a feature release.
 - Only the maintainer decides when the proxy setup is solid enough for `v1.0.0`.
@@ -32,25 +32,25 @@ Releases and Git tags are managed automatically by [Release Please](https://gith
 
 1. **Write Conventional Commits**: When opening pull requests or merging commits into `main`,
    use Conventional Commit prefixes:
-   - `feat:` triggers a minor release bump in the v0 phase (`v0.5.0` → `v0.6.0`).
-   - `fix:` triggers a patch release bump in the v0 series (`v0.5.0` → `v0.5.1`).
+   - `feat:` triggers a minor release bump in the v0 phase (`v0.6.0` → `v0.7.0`).
+   - `fix:` triggers a patch release bump in the v0 series (`v0.6.0` → `v0.6.1`).
    - Other types (`docs:`, `perf:`, `chore:`, `refactor:`) update release notes without a version bump.
 2. **Release PR**: On pushes to `main`, Release Please updates or creates a dedicated
-   Release PR (e.g. `chore: release 0.5.1`) that updates `CHANGELOG.md` and `internal/buildinfo/VERSION`.
+   Release PR (e.g. `chore: release 0.6.1`) that updates `CHANGELOG.md` and `internal/buildinfo/VERSION`.
 3. **Triggering a Release**: Whenever the maintainer is ready to release, simply review and
    merge the Release PR into `main`. Merging it will:
-   - Create the corresponding Git tag (e.g. `v0.5.1`).
+   - Create the corresponding Git tag (e.g. `v0.6.1`).
    - Create the GitHub Release with formatted changelog notes.
    - Run GoReleaser to compile static binaries (Linux, macOS, Windows) and upload checksummed archives.
    - Build and publish multi-arch Docker container images to GHCR.
-4. **Manual Fallback**: Pushing a manual tag (`git tag v0.5.1 && git push origin v0.5.1`) triggers
+4. **Manual Fallback**: Pushing a manual tag (`git tag v0.6.1 && git push origin v0.6.1`) triggers
    the direct `.github/workflows/release.yml` and `.github/workflows/docker.yml` workflows.
 
 ## Inspecting a build
 
 ```sh
 codex-proxy version
-# codex-proxy v0.5.0 (commit=<commit>, date=<RFC3339 timestamp>)
+# codex-proxy v0.6.0 (commit=<commit>, date=<RFC3339 timestamp>)
 ```
 
 The output is one line on stdout; errors go to stderr. No flags or positional
@@ -61,8 +61,8 @@ upstream, read credentials, acquire locks, or initialize history. Startup's
 ## Building
 
 ```sh
-./scripts/build.sh                         # bin/codex-proxy; v0.5.0-dev
-VERSION=v0.5.0 ./scripts/build.sh            # release identity, no publication
+./scripts/build.sh                         # bin/codex-proxy; v0.6.0-dev
+VERSION=v0.6.0 ./scripts/build.sh            # release identity, no publication
 ./bin/codex-proxy version
 ```
 
@@ -79,7 +79,7 @@ fallback. Missing commit/date metadata is reported as `unknown`, never empty.
 Linker fields for future release tooling (#3):
 
 ```text
--X github.com/sortedcord/codex-proxy/internal/buildinfo.Version=v0.5.0
+-X github.com/sortedcord/codex-proxy/internal/buildinfo.Version=v0.6.0
 -X github.com/sortedcord/codex-proxy/internal/buildinfo.Commit=<commit>
 -X github.com/sortedcord/codex-proxy/internal/buildinfo.Date=<RFC3339 timestamp>
 ```

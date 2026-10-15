@@ -65,7 +65,7 @@ class TestDockerTagRules(unittest.TestCase):
         for tag in valid:
             self.assertTrue(is_valid_version_tag(tag), f"expected valid: {tag}")
 
-        invalid = ["0.5.0", "v0.5", "main", "latest", "v1.0.0.0", "v01.0.0"]
+        invalid = ["0.5.0", "v0.5", "main", "latest", "v1.0.0.0", "v01.0.0", "v01.2.3", "v1.2.3-01", "v1.2.3-rc..1"]
         for tag in invalid:
             self.assertFalse(is_valid_version_tag(tag), f"expected invalid: {tag}")
 

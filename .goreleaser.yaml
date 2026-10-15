@@ -2,10 +2,6 @@ version: 2
 
 project_name: codex-proxy
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - id: codex-proxy
     main: ./cmd/codex-proxy

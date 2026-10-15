@@ -18,3 +18,5 @@ mcp-auth.json
 *.lock
 .codex-proxy-*
 /state/
+__pycache__/
+*.pyc
