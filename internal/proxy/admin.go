@@ -18,6 +18,7 @@ import (
 	"github.com/sortedcord/codex-proxy/internal/quota"
 	"github.com/sortedcord/codex-proxy/internal/status"
 	"github.com/sortedcord/codex-proxy/internal/storage"
+	"github.com/terastal-hq/proxylib/adminapi"
 	"github.com/terastal-hq/proxylib/httpx"
 )
 
@@ -122,14 +123,8 @@ func (r *Runtime) handleAdminGetAccount(w http.ResponseWriter, req *http.Request
 		return
 	}
 
-	var target *config.Account
-	for i := range diskAccounts {
-		if diskAccounts[i].ID == id {
-			target = &diskAccounts[i]
-			break
-		}
-	}
-	if target == nil {
+	target, found := adminapi.FindAccount(diskAccounts, id)
+	if !found {
 		writeAdminError(w, http.StatusNotFound, fmt.Sprintf("account %q not found", id))
 		return
 	}
@@ -192,20 +187,16 @@ func (r *Runtime) handleAdminPatchAccount(w http.ResponseWriter, req *http.Reque
 	var updatedAccount config.Account
 	var notFound bool
 	err := r.persist(r.configPath, func(accounts *[]config.Account) error {
-		for i := range *accounts {
-			if (*accounts)[i].ID == id {
-				if payload.Label != nil {
-					(*accounts)[i].Label = strings.TrimSpace(*payload.Label)
-				}
-				if payload.Enabled != nil {
-					(*accounts)[i].Enabled = *payload.Enabled
-				}
-				updatedAccount = (*accounts)[i]
-				return nil
-			}
+		var ok bool
+		updatedAccount, ok = adminapi.ApplyPatchAccount(accounts, id, adminapi.PatchAccountPayload{
+			Label:   payload.Label,
+			Enabled: payload.Enabled,
+		})
+		if !ok {
+			notFound = true
+			return fmt.Errorf("account %q not found", id)
 		}
-		notFound = true
-		return fmt.Errorf("account %q not found", id)
+		return nil
 	})
 
 	if notFound {
@@ -239,18 +230,10 @@ func (r *Runtime) handleAdminDeleteAccount(w http.ResponseWriter, req *http.Requ
 
 	var notFound bool
 	err := r.persist(r.configPath, func(accounts *[]config.Account) error {
-		filtered := make([]config.Account, 0, len(*accounts))
-		for _, acc := range *accounts {
-			if acc.ID == id {
-				continue
-			}
-			filtered = append(filtered, acc)
-		}
-		if len(filtered) == len(*accounts) {
+		if !adminapi.ApplyDeleteAccount(accounts, id) {
 			notFound = true
 			return fmt.Errorf("account %q not found", id)
 		}
-		*accounts = filtered
 		return nil
 	})
 
@@ -420,14 +403,8 @@ func (r *Runtime) handleAdminListKeys(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	var target *config.Account
-	for i := range diskAccounts {
-		if diskAccounts[i].ID == id {
-			target = &diskAccounts[i]
-			break
-		}
-	}
-	if target == nil {
+	target, found := adminapi.FindAccount(diskAccounts, id)
+	if !found {
 		writeAdminError(w, http.StatusNotFound, fmt.Sprintf("account %q not found", id))
 		return
 	}
@@ -493,14 +470,11 @@ func (r *Runtime) handleAdminCreateKey(w http.ResponseWriter, req *http.Request)
 
 	var notFound bool
 	err = r.persist(r.configPath, func(accounts *[]config.Account) error {
-		for i := range *accounts {
-			if (*accounts)[i].ID == id {
-				(*accounts)[i].Keys = append((*accounts)[i].Keys, keyObj)
-				return nil
-			}
+		if !adminapi.ApplyCreateKey(accounts, id, keyObj) {
+			notFound = true
+			return fmt.Errorf("account %q not found", id)
 		}
-		notFound = true
-		return fmt.Errorf("account %q not found", id)
+		return nil
 	})
 
 	if notFound {
@@ -537,25 +511,16 @@ func (r *Runtime) handleAdminDeleteKey(w http.ResponseWriter, req *http.Request)
 	var notFoundKey bool
 
 	err := r.persist(r.configPath, func(accounts *[]config.Account) error {
-		for i := range *accounts {
-			if (*accounts)[i].ID == id {
-				filtered := make([]config.AccountKey, 0, len((*accounts)[i].Keys))
-				for _, k := range (*accounts)[i].Keys {
-					if k.ID == keyID {
-						continue
-					}
-					filtered = append(filtered, k)
-				}
-				if len(filtered) == len((*accounts)[i].Keys) {
-					notFoundKey = true
-					return fmt.Errorf("key %q not found", keyID)
-				}
-				(*accounts)[i].Keys = filtered
-				return nil
-			}
+		foundAcc, foundK := adminapi.ApplyDeleteKey(accounts, id, keyID)
+		if !foundAcc {
+			notFoundAccount = true
+			return fmt.Errorf("account %q not found", id)
 		}
-		notFoundAccount = true
-		return fmt.Errorf("account %q not found", id)
+		if !foundK {
+			notFoundKey = true
+			return fmt.Errorf("key %q not found", keyID)
+		}
+		return nil
 	})
 
 	if notFoundAccount {

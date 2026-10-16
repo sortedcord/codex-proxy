@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 
-	"github.com/sortedcord/codex-proxy/internal/apikey"
 	"github.com/terastal-hq/proxylib/accountid"
+	"github.com/terastal-hq/proxylib/accounts"
 	"github.com/terastal-hq/proxylib/configfile"
 )
 
@@ -30,13 +28,7 @@ type Credentials struct {
 }
 
 // AccountKey represents an API key owned by an account.
-type AccountKey struct {
-	ID        string    `json:"id"`
-	Label     string    `json:"label,omitempty"`
-	Hash      string    `json:"hash"`
-	Last4     string    `json:"last4"`
-	CreatedAt time.Time `json:"createdAt"`
-}
+type AccountKey = accounts.Key
 
 // Account holds the configuration, ChatGPT OAuth credentials, and API keys for one account.
 type Account struct {
@@ -51,6 +43,31 @@ type Account struct {
 	AccountName  string       `json:"accountName,omitempty"`
 	PlanType     string       `json:"planType,omitempty"`
 	Keys         []AccountKey `json:"keys,omitempty"`
+}
+
+func (acc Account) GetID() string           { return acc.ID }
+func (acc Account) GetUpstreamID() string   { return acc.AccountID }
+func (acc Account) GetKeys() []accounts.Key { return acc.Keys }
+func (acc Account) GetLabel() string        { return acc.Label }
+func (acc Account) GetEmail() string        { return acc.AccountEmail }
+func (acc Account) IsEnabled() bool         { return acc.Enabled }
+func (acc *Account) SetLabel(l string)      { acc.Label = l }
+func (acc *Account) SetEnabled(e bool)      { acc.Enabled = e }
+func (acc *Account) AddKey(k accounts.Key)  { acc.Keys = append(acc.Keys, k) }
+func (acc *Account) RemoveKey(keyID string) bool {
+	filtered := make([]accounts.Key, 0, len(acc.Keys))
+	found := false
+	for _, k := range acc.Keys {
+		if k.ID == keyID {
+			found = true
+			continue
+		}
+		filtered = append(filtered, k)
+	}
+	if found {
+		acc.Keys = filtered
+	}
+	return found
 }
 
 // ApplyCredentials updates an account's token and ChatGPT account identity fields.
@@ -83,47 +100,8 @@ func DeriveAccountID(email string, existingIDs []string) string {
 }
 
 // ValidateAccounts validates a collection of accounts for uniqueness and key integrity.
-func ValidateAccounts(accounts []Account) error {
-	seenIDs := make(map[string]bool, len(accounts))
-	seenOpenAIIDs := make(map[string]string, len(accounts))
-	seenKeyHashes := make(map[string]string)
-
-	for _, acc := range accounts {
-		if err := ValidateAccountID(acc.ID); err != nil {
-			return err
-		}
-		if seenIDs[acc.ID] {
-			return fmt.Errorf("duplicate account ID %q", acc.ID)
-		}
-		seenIDs[acc.ID] = true
-
-		if acc.AccountID != "" {
-			if existingAcc, exists := seenOpenAIIDs[acc.AccountID]; exists {
-				return fmt.Errorf("ChatGPT account %q is linked to both %q and %q", acc.AccountID, existingAcc, acc.ID)
-			}
-			seenOpenAIIDs[acc.AccountID] = acc.ID
-		}
-
-		keyIDs := make(map[string]bool, len(acc.Keys))
-		for _, key := range acc.Keys {
-			if key.ID == "" {
-				return fmt.Errorf("account %q has key with empty ID", acc.ID)
-			}
-			if keyIDs[key.ID] {
-				return fmt.Errorf("account %q has duplicate key ID %q", acc.ID, key.ID)
-			}
-			keyIDs[key.ID] = true
-
-			if !strings.HasPrefix(key.Hash, apikey.HashPrefix) {
-				return fmt.Errorf("account %q key %q has invalid hash format", acc.ID, key.ID)
-			}
-			if existingAcc, exists := seenKeyHashes[key.Hash]; exists {
-				return fmt.Errorf("duplicate API key hash across accounts %q and %q", existingAcc, acc.ID)
-			}
-			seenKeyHashes[key.Hash] = acc.ID
-		}
-	}
-	return nil
+func ValidateAccounts(accts []Account) error {
+	return accounts.Validate(accts, "ChatGPT")
 }
 
 // ReadDiskAccounts loads accounts directly from the configuration file at path.
