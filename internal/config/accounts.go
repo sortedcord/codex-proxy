@@ -148,7 +148,7 @@ var legacyCredentialKeys = []string{
 // validates the result, and durably persists it while stripping legacy flat credential fields.
 func UpdateAccounts(path string, update func(accounts *[]Account) error) error {
 	var disk Config
-	_, err := readConfigFile(path, &disk)
+	data, err := readConfigFile(path, &disk)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -166,7 +166,7 @@ func UpdateAccounts(path string, update func(accounts *[]Account) error) error {
 		return fmt.Errorf("validate accounts: %w", err)
 	}
 
-	return configfile.Patch(path, func(fields map[string]json.RawMessage) error {
+	return configfile.PatchWithData(path, data, func(fields map[string]json.RawMessage) error {
 		accountsJSON, err := json.MarshalIndent(accounts, "  ", "  ")
 		if err != nil {
 			return fmt.Errorf("encode accounts: %w", err)
@@ -181,7 +181,12 @@ func UpdateAccounts(path string, update func(accounts *[]Account) error) error {
 
 // UpdateAdminKey updates the adminKeyHash in the configuration file at path.
 func UpdateAdminKey(path string, hash string) error {
-	return configfile.Patch(path, func(fields map[string]json.RawMessage) error {
+	var disk Config
+	data, err := readConfigFile(path, &disk)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return configfile.PatchWithData(path, data, func(fields map[string]json.RawMessage) error {
 		hashJSON, err := json.Marshal(hash)
 		if err != nil {
 			return fmt.Errorf("encode admin key hash: %w", err)
