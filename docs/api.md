@@ -2,10 +2,116 @@
 
 ## Authentication
 
-Inference routes use `Authorization: Bearer $CODEX_PROXY_API_KEY` when configured.
-Management routes **always** require `Authorization: Bearer $CODEX_PROXY_MANAGEMENT_KEY`,
-including on loopback. Keys must be different. Missing management configuration
-returns `503`; absent/wrong keys return `401`. No query-key authentication or CORS.
+### Data Routes (`/v1/*`, `/models`, `/responses`, `/status/*`)
+Requests to data routes must include an account-scoped API key (`cxp_...`). The key selects
+which ChatGPT/Codex account serves the request. The key can be passed via:
+
+1. `Authorization: Bearer <KEY>` (standard OpenAI header)
+2. `x-api-key: <KEY>`
+3. `api-key: <KEY>`
+4. `x-goog-api-key: <KEY>`
+5. `?key=<KEY>` query parameter (only on data routes)
+
+**Localhost single-account exception**: If no keys are configured across any account and exactly
+one account is configured, loopback requests are allowed without keys for convenient local development.
+When multiple accounts are configured, or when listening on non-loopback interfaces, an API key is required.
+
+### Admin Routes (`/admin/*`)
+Administration routes require `ADMIN_API_KEY` (or `CODEX_PROXY_MANAGEMENT_KEY`). It can be passed via:
+- `Authorization: Bearer <ADMIN_KEY>`
+- `x-api-key: <ADMIN_KEY>`
+- `api-key: <ADMIN_KEY>`
+
+*Note:* URL query parameters (`?key=...`) are explicitly rejected on admin routes to prevent secrets
+from appearing in URLs or logs. If `ADMIN_API_KEY` is not configured, all `/admin/*` routes return `503 Service Unavailable`.
+
+---
+
+## Admin API
+
+All admin endpoints require `ADMIN_API_KEY`.
+
+| Method and Path | Description |
+|---|---|
+| `GET /admin/accounts` | List all configured accounts, key counts, and latest quota summaries |
+| `GET /admin/accounts/{id}` | Get account details and plan type |
+| `PATCH /admin/accounts/{id}` | Update account label or enabled status |
+| `DELETE /admin/accounts/{id}` | Delete an account from the proxy |
+| `POST /admin/login-sessions` | Initiate an OAuth login session for an account |
+| `GET /admin/login-sessions/{id}` | Get login session status & one-time issued key |
+| `POST /admin/login-sessions/{id}/complete` | Complete OAuth login session with code/state or callback URL |
+| `GET /admin/accounts/{id}/keys` | List API keys for an account |
+| `POST /admin/accounts/{id}/keys` | Create a new API key for an account |
+| `DELETE /admin/accounts/{id}/keys/{keyId}` | Revoke an API key |
+| `GET /admin/accounts/{id}/quota` | Latest quota snapshot for an account |
+| `GET /admin/accounts/{id}/usage` | Historical quota observations for an account |
+| `GET /admin/quota` | Multi-account quota overview across all accounts |
+
+### `GET /admin/accounts`
+Returns a list of all configured accounts:
+```json
+[
+  {
+    "id": "work",
+    "label": "Work Account",
+    "email": "developer@company.com",
+    "name": "Jane Developer",
+    "enabled": true,
+    "credential_configured": true,
+    "key_count": 1,
+    "quota": { ... },
+    "polling": { ... },
+    "stale": false
+  }
+]
+```
+
+### `PATCH /admin/accounts/{id}`
+Update account label or enabled flag:
+```json
+{
+  "label": "Work (Disabled)",
+  "enabled": false
+}
+```
+Disabled accounts immediately return `403 Forbidden` for inference requests.
+
+### `POST /admin/login-sessions`
+Initiate an OAuth login session:
+```json
+{
+  "account": "work",
+  "replace": false,
+  "issue_key": "bifrost"
+}
+```
+Returns:
+```json
+{
+  "id": "sess_12345678",
+  "login_url": "https://auth.openai.com/oauth/authorize?...",
+  "expires_at": "2026-10-16T12:05:00Z"
+}
+```
+
+### `POST /admin/accounts/{id}/keys`
+Create a new API key for an account:
+```json
+{
+  "label": "production-service"
+}
+```
+Returns (201 Created):
+```json
+{
+  "id": "key_3f9a1c2e",
+  "label": "production-service",
+  "key": "cxp_abcdef1234567890..."
+}
+```
+*Note:* The plaintext secret is only shown once upon creation.
+
+---
 
 ## Health
 

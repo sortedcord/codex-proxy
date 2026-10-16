@@ -3,6 +3,16 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Features
+
+* **accounts:** add multi-account support with account-scoped API keys (`cxp_...`)
+* **admin:** add Admin API protected by `ADMIN_API_KEY` for accounts, keys, login sessions, and quota
+* **cli:** add CLI commands for account and API key management (`accounts`, `keys`, `admin-key`, `login`)
+* **config:** automatically migrate single-account credentials to multi-account format without modifying legacy files
+* **quota:** add multi-account quota aggregation and per-account status history
+
 ## [0.6.0](https://github.com/sortedcord/codex-proxy/compare/v0.5.0...v0.6.0) (2026-10-13)
 
 

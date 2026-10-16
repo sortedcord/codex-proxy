@@ -3,18 +3,42 @@
 The organization follows `sortedcord/antigravity-proxy`, but protocol/provider logic
 remains Codex-specific and standard-library-only:
 
-- `cmd/codex-proxy`: CLI parsing, signals, exit behavior.
-- `internal/config`: flags, environment, trust-boundary and key validation.
-- `internal/oauth`: native Codex auth documents, serialized refresh, identity hints,
-  PKCE browser sessions, and atomic account replacement.
-- `internal/proxy`: runtime ownership, authenticated routing, Responses transport,
+- `cmd/codex-proxy`: CLI parsing, signals, account and key management commands, exit behavior.
+- `internal/apikey`: key generation, hashing (`sha256:`), extraction, and constant-time registry lookup.
+- `internal/config`: flags, environment, multi-account schema, strict JSON decoding, validation, and persistence.
+- `internal/oauth`: native Codex auth documents, per-account managers, serialized refresh, identity hints,
+  multi-session PKCE browser flows, and atomic account replacement.
+- `internal/proxy`: runtime ownership, multi-account key dispatch, admin API, Responses transport,
   request normalization, terminal output repair, streaming metadata and idle watchdog.
 - `internal/quota`: Codex usage requests and normalization of provider-reported limit
   families/windows. No local estimation or Google model-pool assumptions.
-- `internal/status`: independent polling, cached read APIs, private bounded journals,
+- `internal/status`: independent polling, cached read APIs, private bounded journals per account,
   account attribution, staleness and historical filtering.
 - `internal/storage`: regular-file checks, private atomic writes and native OS locks.
 - `internal/httputil`: bounded reads and shared authentication/HTTP helpers.
+
+## Multi-Account Architecture
+
+The proxy supports hosting multiple ChatGPT/Codex accounts concurrently within one server process:
+
+1. **Account-Scoped Key Dispatch**:
+   `apikey.Registry` maps client API key hashes (`cxp_...`) directly to `{AccountID, KeyID}` bindings in constant time.
+   Incoming inference and status requests are routed to the matching account runtime.
+   On loopback interfaces with exactly one configured account and zero keys, unauthenticated calls fall back
+   to that account for local development convenience.
+
+2. **Per-Account Token Refresh and State**:
+   Each account owns its own `oauth.Manager` and token state. Token refreshes are mutex-serialized per account,
+   and rotated credentials are durably written to `config.json` via atomic file replacements, leaving legacy
+   `auth.json` files untouched.
+
+3. **Isolated Status & Quota Journals**:
+   Quota observations are written to private, hashed per-account journals (`usage-<sha256>.jsonl`) protected
+   by OS locks (`.lock`). Polling runs independently per account.
+
+4. **Admin API Protected by ADMIN_API_KEY**:
+   Management routes (`/admin/*`) require `ADMIN_API_KEY`. The Admin API provides full CRUD for accounts,
+   API key generation and revocation, login session creation and completion, and aggregated quota monitoring.
 
 ## Inference fidelity
 

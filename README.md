@@ -1,12 +1,15 @@
 # codex-proxy
 
-A small, single-active-account proxy from the **OpenAI Responses API** to the
+A fast, lightweight multi-account proxy from the **OpenAI Responses API** to the
 **ChatGPT Codex backend**. The runtime uses only Go's standard library: no
 third-party dependencies, database, admin UI, or cross-provider translation.
 
-It reuses file-backed `codex login` credentials. Optional management APIs provide
-account/quota status, persistent quota history, browser OAuth login, and account
-replacement without restarting. It does not route to the paid OpenAI developer API.
+It supports hosting multiple accounts simultaneously with account-scoped API keys
+(`cxp_...`), automatic migration of existing single-account credentials without data loss,
+an Admin API protected by `ADMIN_API_KEY`, per-account token refresh and quota history,
+and built-in CLI commands for account and key management. It retains localhost
+zero-key convenience when exactly one account is configured. It does not route to
+the paid OpenAI developer API.
 
 ## Quick start
 
@@ -129,6 +132,60 @@ without loading credentials or starting the server. Local builds report
 from the upstream Codex client version. Automated Git tagging, changelogs, and
 release management are handled by [Release Please](https://github.com/googleapis/release-please)
 from Conventional Commits. See [versioning and release management](docs/versioning.md).
+
+## Multi-Account Management
+
+Codex Proxy supports hosting multiple ChatGPT accounts simultaneously. Each account
+has its own ID, label, enabled state, tokens, and dedicated API keys (`cxp_...`).
+
+### CLI Management
+
+Manage accounts and keys directly via the CLI:
+
+```sh
+# Authenticate or add a new account via browser OAuth:
+codex-proxy login --account work --issue-key bifrost
+
+# List configured accounts:
+codex-proxy accounts list
+
+# Enable or disable accounts:
+codex-proxy accounts disable work
+codex-proxy accounts enable work
+
+# List, create, and revoke API keys:
+codex-proxy keys list work
+codex-proxy keys create work --label my-client-key
+codex-proxy keys revoke work key_3f9a1c2e
+
+# Rotate admin API key:
+codex-proxy admin-key rotate
+```
+
+### Admin API
+
+Protected by `ADMIN_API_KEY`:
+
+```sh
+export ADMIN_API_KEY="admin-secret-key"
+codex-proxy serve
+```
+
+- `GET /admin/accounts`: list all configured accounts, status, and quota
+- `GET /admin/accounts/{id}`: get account details
+- `PATCH /admin/accounts/{id}`: update label or enabled state
+- `DELETE /admin/accounts/{id}`: delete an account
+- `POST /admin/login-sessions`: initiate OAuth login for an account
+- `GET /admin/login-sessions/{id}`: get login status and one-time issued key
+- `POST /admin/login-sessions/{id}/complete`: submit redirect callback URL or code/state
+- `GET /admin/accounts/{id}/keys`: list API keys for an account
+- `POST /admin/accounts/{id}/keys`: create a new account-scoped API key
+- `DELETE /admin/accounts/{id}/keys/{keyId}`: revoke an API key
+- `GET /admin/accounts/{id}/quota`: latest quota snapshot for an account
+- `GET /admin/accounts/{id}/usage`: historical quota observations for an account
+- `GET /admin/quota`: multi-account quota overview across all accounts
+
+See [API Reference](docs/api.md) for full endpoint specifications.
 
 ## Optional management
 
