@@ -49,6 +49,21 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		errInvalidInferenceKey.reject(w, r)
 		return
 	}
+	p.dispatch(w, r)
+}
+
+func (p *proxy) serveHTTPAuthorized(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.URL.Path == "/health" {
+		if requireMethod(w, r, http.MethodGet) {
+			writeJSON(w, http.StatusOK, []byte(`{"status":"ok"}`))
+		}
+		return
+	}
+	p.dispatch(w, r)
+}
+
+func (p *proxy) dispatch(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	for _, prefix := range []string{"/v1", "/backend-api/codex"} {
 		if strings.HasPrefix(path, prefix+"/") {

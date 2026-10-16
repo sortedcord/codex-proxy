@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
+	"github.com/sortedcord/codex-proxy/internal/apikey"
 	"github.com/sortedcord/codex-proxy/internal/httputil"
 	"github.com/sortedcord/codex-proxy/internal/oauth"
 	"github.com/sortedcord/codex-proxy/internal/quota"
@@ -18,45 +19,234 @@ import (
 
 func (r *Runtime) ServeHTTP(w http.ResponseWriter, request *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	// 1. Health check (public)
 	if request.URL.Path == "/health" {
 		if !requireMethod(w, request, http.MethodGet) {
 			return
 		}
-		// Liveness must not wait for a refresh mutex or contact upstream.
-		info, err := os.Stat(r.cfg.AuthFile)
-		configured := err == nil && info.Mode().IsRegular()
-		r.writeManagementJSON(w, http.StatusOK, map[string]any{"status": "ok", "credential_configured": configured})
+		r.writeManagementJSON(w, http.StatusOK, map[string]any{
+			"status":                "ok",
+			"credential_configured": r.hasAnyCredentialConfigured(),
+		})
 		return
 	}
-	management := strings.HasPrefix(request.URL.Path, "/status/") || strings.HasPrefix(request.URL.Path, "/config/")
-	if !management {
-		r.inference.ServeHTTP(w, request)
+
+	// 2. Admin routes
+	if request.URL.Path == "/admin" || strings.HasPrefix(request.URL.Path, "/admin/") {
+		r.handleAdmin(w, request)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	if r.cfg.ManagementKey == "" {
-		errManagementDisabled.reject(w, request)
+
+	// 3. Legacy login route
+	if request.URL.Path == "/config/login" {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.cfg.ManagementKey == "" {
+			errManagementDisabled.reject(w, request)
+			return
+		}
+		if !httputil.BearerMatches(request, r.cfg.ManagementKey) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			errInvalidManagementKey.reject(w, request)
+			return
+		}
+		r.handleLogin(w, request)
 		return
 	}
-	if !httputil.BearerMatches(request, r.cfg.ManagementKey) {
+
+	// 4. Status routes
+	if strings.HasPrefix(request.URL.Path, "/status/") {
+		w.Header().Set("Cache-Control", "no-store")
+		r.handleStatusRoute(w, request)
+		return
+	}
+
+	// 5. Data routes
+	reg := r.registry.Load()
+	if reg == nil {
+		writeError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is not started")
+		return
+	}
+
+	presentedKey := apikey.Extract(request, true)
+	var account *accountRuntime
+	var keyID string
+
+	if presentedKey == "" {
+		host, _, _ := net.SplitHostPort(r.cfg.Addr)
+		if isLoopback(host) && len(reg.accounts) == 1 && reg.keys.Size() == 0 {
+			for _, acc := range reg.accounts {
+				account = acc
+				break
+			}
+		}
+		if account == nil {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			errInvalidInferenceKey.reject(w, request)
+			return
+		}
+	} else {
+		binding, ok := reg.keys.Lookup(presentedKey)
+		if !ok {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			errInvalidInferenceKey.reject(w, request)
+			return
+		}
+		account = reg.accounts[binding.AccountID]
+		if account == nil {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			errInvalidInferenceKey.reject(w, request)
+			return
+		}
+		keyID = binding.KeyID
+	}
+
+	if !account.enabled {
+		writeError(w, http.StatusForbidden, "account_disabled", "account is disabled")
+		return
+	}
+
+	reg.recordKeyUsage(keyID)
+	account.proxy.serveHTTPAuthorized(w, request)
+}
+
+func (r *Runtime) authorizedAdminOrManagement(req *http.Request) bool {
+	presented := apikey.Extract(req, false)
+	if presented == "" {
+		return false
+	}
+	if r.cfg.ManagementKey != "" && (httputil.BearerMatches(req, r.cfg.ManagementKey) || presented == r.cfg.ManagementKey) {
+		return true
+	}
+	if r.adminAPIKey != "" && apikey.Match(presented, r.adminAPIKey) {
+		return true
+	}
+	if r.adminKeyHash != "" && apikey.Match(presented, r.adminKeyHash) {
+		return true
+	}
+	return false
+}
+
+func (r *Runtime) handleStatusRoute(w http.ResponseWriter, request *http.Request) {
+	if !requireMethod(w, request, http.MethodGet) {
+		return
+	}
+
+	reg := r.registry.Load()
+	if reg == nil {
+		writeError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is not started")
+		return
+	}
+
+	presentedKey := apikey.Extract(request, true)
+	if r.cfg.APIKey != "" && presentedKey == r.cfg.APIKey && r.cfg.ManagementKey != "" {
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		errInvalidManagementKey.reject(w, request)
 		return
 	}
+	var account *accountRuntime
+
+	if presentedKey != "" {
+		if binding, ok := reg.keys.Lookup(presentedKey); ok {
+			account = reg.accounts[binding.AccountID]
+		}
+		if account == nil && r.authorizedAdminOrManagement(request) {
+			if def, ok := reg.accounts["default"]; ok {
+				account = def
+			} else {
+				for _, acc := range reg.accounts {
+					account = acc
+					break
+				}
+			}
+		}
+		if account == nil {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			errInvalidInferenceKey.reject(w, request)
+			return
+		}
+	} else {
+		host, _, _ := net.SplitHostPort(r.cfg.Addr)
+		if isLoopback(host) && len(reg.accounts) == 1 && reg.keys.Size() == 0 {
+			for _, acc := range reg.accounts {
+				account = acc
+				break
+			}
+		}
+		if account == nil {
+			if r.cfg.ManagementKey == "" && r.adminAPIKey == "" {
+				errManagementDisabled.reject(w, request)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			errInvalidManagementKey.reject(w, request)
+			return
+		}
+	}
+
+	if !account.enabled {
+		writeError(w, http.StatusForbidden, "account_disabled", "account is disabled")
+		return
+	}
+
 	switch request.URL.Path {
-	case "/config/login":
-		r.handleLogin(w, request)
-	case "/status/account", "/status/limit", "/status/usage":
-		r.handleStatus(w, request)
+	case "/status/account":
+		r.handleStatusAccountFor(w, account)
+	case "/status/limit":
+		switch {
+		case account.status != nil:
+			account.status.ServeHTTP(w, request)
+		case r.status != nil:
+			r.handleStatus(w, request)
+		default:
+			writeError(w, http.StatusServiceUnavailable, "quota_unavailable", "quota service not configured for account")
+		}
+	case "/status/usage":
+		switch {
+		case account.status != nil:
+			account.status.ServeHTTP(w, request)
+		case r.status != nil:
+			r.handleStatus(w, request)
+		default:
+			writeError(w, http.StatusServiceUnavailable, "history_unavailable", "quota history is unavailable")
+		}
 	default:
 		httputil.RejectUnreadBody(w, request)
-		writeError(
-			w,
-			http.StatusNotFound,
-			"not_found",
-			"unknown management endpoint",
-		)
+		writeError(w, http.StatusNotFound, "not_found", "unknown management endpoint")
 	}
+}
+
+func (r *Runtime) handleStatusAccountFor(w http.ResponseWriter, acc *accountRuntime) {
+	if acc.auth == nil {
+		writeError(w, http.StatusServiceUnavailable, "credentials_unavailable", "Codex credentials are not configured or available")
+		return
+	}
+	identity, err := acc.auth.Profile()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "credentials_unavailable", "Codex credentials are not configured or available")
+		return
+	}
+	var snapshot quota.Snapshot
+	var available bool
+	var polling status.PollInfo
+	var stale bool
+	if acc.status != nil {
+		snapshot, available, polling = acc.status.Latest()
+		stale = !available || acc.status.Stale(snapshot, polling)
+		if available && snapshot.PlanType != "" {
+			identity.PlanType = snapshot.PlanType
+			identity.PlanSource = "wham/usage"
+		}
+	}
+	r.writeManagementJSON(w, http.StatusOK, struct {
+		oauth.Profile
+		QuotaAvailable bool `json:"quota_available"`
+		QuotaStale     bool `json:"quota_stale"`
+	}{
+		Profile:        identity,
+		QuotaAvailable: available,
+		QuotaStale:     stale,
+	})
 }
 
 func (r *Runtime) handleStatus(w http.ResponseWriter, request *http.Request) {
