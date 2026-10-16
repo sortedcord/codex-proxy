@@ -5,7 +5,7 @@ import (
 	"github.com/terastal-hq/proxylib/privatefile"
 )
 
-// MaxHistorySamples bounds the logical per-account retention in config and storage.
+// MaxHistorySamples is the default for the deprecated, ignored history-max-samples flag.
 const MaxHistorySamples = 10000
 
 // CommitError means rename succeeded but directory durability could not be confirmed.

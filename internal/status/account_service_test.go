@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,15 +13,12 @@ import (
 )
 
 func TestAccountServiceLifecycleAndHTTP(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "history")
 	now := time.Now().UTC()
 	fetchCalls := 0
 
 	svc, err := NewAccountService(context.Background(), AccountOptions{
-		Dir:        dir,
-		Namespace:  "test-account-1",
-		MaxSamples: 100,
-		Interval:   100 * time.Millisecond,
+		Namespace: "test-account-1",
+		Interval:  100 * time.Millisecond,
 		Fetch: func(ctx context.Context) (quota.Snapshot, error) {
 			fetchCalls++
 			return quota.Snapshot{

@@ -32,23 +32,19 @@ func TestInjectedEnvironmentPrecedence(t *testing.T) {
 	}
 }
 
+// TestNoHomeDoesNotCreateRelativeDefaults verifies that a missing HOME prevents
+// resolving the default auth file when CODEX_HOME is also unset.
 func TestNoHomeDoesNotCreateRelativeDefaults(t *testing.T) {
-	codexHome := filepath.Join(t.TempDir(), "codex")
 	env := environment{
-		lookup: func(name string) (string, bool) {
-			if name == "CODEX_HOME" {
-				return codexHome, true
-			}
-			return "", false
-		},
-		home: func() (string, error) { return "", errors.New("no home") },
+		lookup: func(string) (string, bool) { return "", false },
+		home:   func() (string, error) { return "", errors.New("no home") },
 	}
 	_, err := parse(nil, io.Discard, env)
 	if err == nil {
-		t.Fatal("missing data home produced a configuration without an error")
+		t.Fatal("missing home produced a configuration without an error")
 	}
-	if !strings.Contains(err.Error(), "history directory") {
-		t.Fatalf("missing data home error=%v, want history directory error", err)
+	if !strings.Contains(err.Error(), "auth file") {
+		t.Fatalf("missing home error=%v, want auth file error", err)
 	}
 }
 

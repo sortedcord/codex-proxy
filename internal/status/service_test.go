@@ -3,7 +3,6 @@ package status
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,7 +16,7 @@ func TestServicePollingStalenessAndAccountIsolation(t *testing.T) {
 	active.Store("account-a")
 	var failed atomic.Bool
 	service, err := NewService(context.Background(), Options{
-		Dir: filepath.Join(t.TempDir(), "history"), MaxSamples: 5, Interval: time.Hour,
+		Interval: time.Hour,
 		Account: func() (oauth.Profile, error) {
 			return oauth.Profile{CredentialConfigured: true, AccountID: active.Load().(string)}, nil
 		},

@@ -14,11 +14,9 @@ import (
 type PollInfo = poller.PollInfo
 
 type Options struct {
-	Dir        string
-	MaxSamples int
-	Interval   time.Duration
-	Account    func() (oauth.Profile, error)
-	Fetch      func(context.Context) (quota.Snapshot, error)
+	Interval time.Duration
+	Account  func() (oauth.Profile, error)
+	Fetch    func(context.Context) (quota.Snapshot, error)
 }
 
 type Service struct {
@@ -97,41 +95,53 @@ func (s *Service) poll() {
 
 	sample, err := s.options.Fetch(ctx)
 
+	// The account callback may wait for OAuth. Do not nest that lock inside mu.
+	active, accountErr := s.options.Account()
+
+	// Callers look observations up by identity scope (status API) or by the
+	// ChatGPT account ID (per-account adapters), so record under both.
+	var keys []string
+	addKey := func(key string) {
+		if key == "" {
+			return
+		}
+		for _, existing := range keys {
+			if existing == key {
+				return
+			}
+		}
+		keys = append(keys, key)
+	}
+	if accountErr == nil {
+		addKey(active.Scope())
+		addKey(active.AccountID)
+	}
+	if err == nil {
+		addKey(sample.Scope())
+		addKey(sample.AccountID)
+	}
+	if len(keys) == 0 {
+		keys = append(keys, "default")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
-
-	active, accountErr := s.options.Account()
-	scope := ""
-	if accountErr == nil && active.Scope() != "" {
-		scope = active.Scope()
-	}
-	if scope == "" && sample.AccountID != "" {
-		scope = sample.Scope()
-	}
-	if scope == "" {
-		scope = "default"
-	}
-
-	info := s.polling[scope]
-	info.IntervalSeconds = int64(s.options.Interval / time.Second)
-	info.LastAttemptAt = &attempt
-	if err != nil {
-		info.LastError = "quota observation failed; upstream unavailable"
-	} else {
-		s.snapshots[scope] = sample
-		s.available[scope] = true
-		info.LastSuccessAt = &sample.ObservedAt
-		info.LastError = ""
-	}
-	s.polling[scope] = info
-
-	if sampleScope := sample.Scope(); sampleScope != "" && sampleScope != scope {
-		s.snapshots[sampleScope] = sample
-		s.available[sampleScope] = true
-		s.polling[sampleScope] = info
+	for _, key := range keys {
+		info := s.polling[key]
+		info.IntervalSeconds = int64(s.options.Interval / time.Second)
+		info.LastAttemptAt = &attempt
+		if err != nil {
+			info.LastError = "quota observation failed; upstream unavailable"
+		} else {
+			s.snapshots[key] = sample
+			s.available[key] = true
+			info.LastSuccessAt = &sample.ObservedAt
+			info.LastError = ""
+		}
+		s.polling[key] = info
 	}
 }
 

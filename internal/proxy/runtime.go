@@ -340,9 +340,7 @@ func newRuntime(
 			ClientVersion: cfg.ClientVersion,
 		}
 		rt.status, err = status.NewService(owned, status.Options{
-			Dir:        cfg.HistoryDir,
-			MaxSamples: cfg.HistoryMaxSamples,
-			Interval:   cfg.PollInterval,
+			Interval: cfg.PollInterval,
 			Account: func() (oauth.Profile, error) {
 				if a := rt.getAuth(); a != nil {
 					return a.Profile()
@@ -434,10 +432,8 @@ func (r *Runtime) prepareAccount(accCfg config.Account, previous *accountRuntime
 		candidate.status = previous.status
 	default:
 		statusSvc, err := status.NewAccountService(r.ctx, status.AccountOptions{
-			Dir:        r.cfg.HistoryDir,
-			Namespace:  namespace,
-			MaxSamples: r.cfg.HistoryMaxSamples,
-			Interval:   r.cfg.PollInterval,
+			Namespace: namespace,
+			Interval:  r.cfg.PollInterval,
 			Fetch: func(ctx context.Context) (quota.Snapshot, error) {
 				creds, err := authMgr.Current(ctx)
 				if err != nil {

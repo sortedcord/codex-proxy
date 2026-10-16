@@ -13,11 +13,9 @@ import (
 
 // AccountOptions defines configuration for an account-scoped status service.
 type AccountOptions struct {
-	Dir        string
-	Namespace  string
-	MaxSamples int
-	Interval   time.Duration
-	Fetch      func(context.Context) (quota.Snapshot, error)
+	Namespace string
+	Interval  time.Duration
+	Fetch     func(context.Context) (quota.Snapshot, error)
 }
 
 // AccountService manages background quota polling and status endpoints for one account.

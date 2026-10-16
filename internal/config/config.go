@@ -28,20 +28,23 @@ const (
 )
 
 type Config struct {
-	Addr              string        `json:"addr,omitempty"`
-	AuthFile          string        `json:"authFile,omitempty"`
-	ConfigFile        string        `json:"configFile,omitempty"`
-	ConfigPath        string        `json:"-"`
-	APIKey            string        `json:"apiKey,omitempty"`
-	ManagementKey     string        `json:"managementKey,omitempty"`
-	AdminKeyHash      string        `json:"adminKeyHash,omitempty"`
-	AdminAPIKey       string        `json:"-"`
-	Accounts          []Account     `json:"accounts,omitempty"`
-	Upstream          string        `json:"upstream,omitempty"`
-	ClientVersion     string        `json:"clientVersion,omitempty"`
-	UserAgent         string        `json:"userAgent,omitempty"`
-	IdleTimeout       time.Duration `json:"idleTimeout,omitempty"`
-	UsageURL          string        `json:"usageUrl,omitempty"`
+	Addr          string        `json:"addr,omitempty"`
+	AuthFile      string        `json:"authFile,omitempty"`
+	ConfigFile    string        `json:"configFile,omitempty"`
+	ConfigPath    string        `json:"-"`
+	APIKey        string        `json:"apiKey,omitempty"`
+	ManagementKey string        `json:"managementKey,omitempty"`
+	AdminKeyHash  string        `json:"adminKeyHash,omitempty"`
+	AdminAPIKey   string        `json:"-"`
+	Accounts      []Account     `json:"accounts,omitempty"`
+	Upstream      string        `json:"upstream,omitempty"`
+	ClientVersion string        `json:"clientVersion,omitempty"`
+	UserAgent     string        `json:"userAgent,omitempty"`
+	IdleTimeout   time.Duration `json:"idleTimeout,omitempty"`
+	UsageURL      string        `json:"usageUrl,omitempty"`
+	// Deprecated: quota history is no longer persisted. HistoryDir and
+	// HistoryMaxSamples are accepted so existing configs and flags still load,
+	// but they are ignored.
 	HistoryDir        string        `json:"historyDir,omitempty"`
 	PollInterval      time.Duration `json:"pollInterval,omitempty"`
 	HistoryMaxSamples int           `json:"historyMaxSamples,omitempty"`
@@ -148,7 +151,7 @@ func parse(args []string, output io.Writer, env environment) (Config, error) {
 		},
 		{
 			value: &cfg.HistoryDir, name: "history-dir", fallback: env.defaultValue("CODEX_PROXY_HISTORY_DIR", historyDir),
-			help: "private directory for account-specific quota history",
+			help: "deprecated and ignored: quota history is no longer persisted",
 		},
 	}
 	for _, option := range options {
@@ -176,7 +179,7 @@ func parse(args []string, output io.Writer, env environment) (Config, error) {
 		&cfg.HistoryMaxSamples,
 		"history-max-samples",
 		storage.MaxHistorySamples,
-		"maximum retained quota observations per account (1 to 10000)",
+		"deprecated and ignored: quota history is no longer persisted",
 	)
 	if err := flags.Parse(args); err != nil {
 		return cfg, err
@@ -256,9 +259,6 @@ func parse(args []string, output io.Writer, env environment) (Config, error) {
 
 	if cfg.AuthFile == "" {
 		return cfg, errors.New("cannot resolve auth file; set CODEX_HOME or -auth-file")
-	}
-	if cfg.HistoryDir == "" {
-		return cfg, errors.New("cannot resolve history directory; set XDG_DATA_HOME or -history-dir")
 	}
 	parsedInterval, err := time.ParseDuration(pollInterval)
 	if err != nil {
@@ -475,19 +475,13 @@ func (c Config) Validate() error {
 		return err
 	}
 	if c.AuthFile == "" && len(c.Accounts) == 0 {
-		return errors.New("auth file and history directory are required")
-	}
-	if strings.TrimSpace(c.HistoryDir) == "" {
-		return errors.New("auth file and history directory are required")
+		return errors.New("auth file or configured accounts are required")
 	}
 	if c.IdleTimeout <= 0 {
 		return errors.New("idle timeout must be positive")
 	}
 	if c.PollInterval < 10*time.Second || c.PollInterval > 24*time.Hour {
 		return errors.New("quota polling interval must be between 10s and 24h")
-	}
-	if c.HistoryMaxSamples < 1 || c.HistoryMaxSamples > storage.MaxHistorySamples {
-		return errors.New("history sample limit must be between 1 and 10000")
 	}
 	invalidHeader := strings.ContainsAny(c.ClientVersion+c.UserAgent+c.APIKey+c.ManagementKey+c.AdminAPIKey, "\r\n")
 	if c.ClientVersion == "" || invalidHeader {

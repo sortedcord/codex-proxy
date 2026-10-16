@@ -195,7 +195,10 @@ The source is Codex's `/backend-api/wham/usage`, not local per-request counters.
 
 ## Persistent history
 
-`GET /status/usage` queries only the active account's journal.
+> **Note:** Disk persistence of historical metrics has been removed. `GET /status/usage`
+> returns an empty sample page for backward compatibility with monitoring clients.
+
+`GET /status/usage` accepts the query parameters below and returns `{"samples": []}`.
 
 | Query | Values / default |
 | --- | --- |

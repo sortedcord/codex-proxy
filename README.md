@@ -242,11 +242,11 @@ Use the **actual** returned callback port and redirect. Codes are exchanged once
 failed/expired/consumed attempts need a fresh GET. A successful exchange is saved
 independently of the submitting client's disconnect, within a bounded lifetime.
 
-The old account remains active until the candidate's history is prepared and its
-credentials are committed. Refresh and replacement are serialized. In-flight requests
-retain their original credentials and cannot recover using the new account's tokens.
-History is isolated per account and survives restart and switching back. Start a new
-conversation after switching: prior encrypted reasoning belongs to the old account.
+The old account remains active until the candidate's credentials are committed.
+Refresh and replacement are serialized. In-flight requests retain their original credentials
+and cannot recover using the new account's tokens. Quota observations are kept in memory;
+historical metric journals are no longer written to disk. Start a new conversation after
+switching: prior encrypted reasoning belongs to the old account.
 External account changes in `auth.json` still fail closed; use runtime login or restart.
 
 ## Clients
