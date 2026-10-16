@@ -3,13 +3,11 @@ package status
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/sortedcord/codex-proxy/internal/oauth"
 	"github.com/sortedcord/codex-proxy/internal/quota"
-	"github.com/sortedcord/codex-proxy/internal/storage"
 )
 
 type PollInfo struct {
@@ -30,9 +28,9 @@ type Options struct {
 type Service struct {
 	mu        sync.Mutex
 	options   Options
-	histories map[string]*History
+	snapshots map[string]quota.Snapshot
+	available map[string]bool
 	polling   map[string]PollInfo
-	lock      *storage.Lock
 	ctx       context.Context
 	cancel    context.CancelFunc
 	trigger   chan struct{}
@@ -49,95 +47,37 @@ func NewService(ctx context.Context, options Options) (*Service, error) {
 	if options.Interval <= 0 {
 		return nil, errors.New("polling interval must be positive")
 	}
-	if err := storage.PrivateDir(options.Dir); err != nil {
-		return nil, err
-	}
-	lock, err := storage.Acquire(filepath.Join(options.Dir, "status.lock"))
-	if err != nil {
-		return nil, err
-	}
+
 	owned, cancel := context.WithCancel(ctx)
 	service := &Service{
-		options: options, histories: map[string]*History{}, polling: map[string]PollInfo{},
-		lock: lock, ctx: owned, cancel: cancel, trigger: make(chan struct{}, 1), done: make(chan struct{}),
-	}
-	if account, err := options.Account(); err == nil {
-		if _, err := service.history(account.Scope()); err != nil {
-			cancel()
-			_ = lock.Close()
-			return nil, err
-		}
+		options:   options,
+		snapshots: map[string]quota.Snapshot{},
+		available: map[string]bool{},
+		polling:   map[string]PollInfo{},
+		ctx:       owned,
+		cancel:    cancel,
+		trigger:   make(chan struct{}, 1),
+		done:      make(chan struct{}),
 	}
 	go service.run()
 	return service, nil
 }
 
-// Prepare validates the candidate's journal before committing login credentials.
+// Prepare is a no-op when historical metrics storage is disabled.
 func (s *Service) Prepare(accountID string) error {
-	_, err := s.history(accountID)
-	return err
-}
-
-func (s *Service) history(accountID string) (*History, error) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil, errors.New("quota service is closed")
-	}
-	if history := s.histories[accountID]; history != nil {
-		s.mu.Unlock()
-		return history, nil
-	}
-	s.mu.Unlock()
-
-	// The account callback may wait for OAuth. Do not nest that lock inside mu.
-	active, accountErr := s.options.Account()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return nil, errors.New("quota service is closed")
+		return errors.New("quota service is closed")
 	}
-	if history := s.histories[accountID]; history != nil {
-		return history, nil
-	}
-	if len(s.histories) >= 2 && (accountErr != nil || active.Scope() == "") {
-		// Fail closed rather than guessing which account is safe to evict.
-		return nil, errors.New("cannot evict quota history while the active account is unavailable")
-	}
-	history, err := OpenHistory(s.options.Dir, accountID, s.options.MaxSamples)
-	if err != nil {
-		return nil, err
-	}
-	// Prepare the candidate before eviction: a corrupt journal must not disturb
-	// the old cache. Keep at most two successfully opened journals.
-	if len(s.histories) >= 2 {
-		for id, old := range s.histories {
-			if id == active.Scope() {
-				continue
-			}
-			if err := old.Close(); err != nil {
-				return nil, errors.Join(err, history.Close())
-			}
-			delete(s.histories, id)
-			delete(s.polling, id)
-			break
-		}
-	}
-	s.histories[accountID] = history
-	return history, nil
-}
-
-func (s *Service) TriggerPoll() {
-	select {
-	case s.trigger <- struct{}{}:
-	default:
-	}
+	return nil
 }
 
 func (s *Service) run() {
 	defer close(s.done)
 	ticker := time.NewTicker(s.options.Interval)
 	defer ticker.Stop()
+
 	s.poll()
 	for {
 		select {
@@ -152,75 +92,83 @@ func (s *Service) run() {
 }
 
 func (s *Service) poll() {
-	account, err := s.options.Account()
-	if err != nil || s.ctx.Err() != nil {
+	if s.ctx.Err() != nil {
 		return
 	}
 	attempt := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
+
 	sample, err := s.options.Fetch(ctx)
-	if err == nil {
-		// Fetch may have started under another account after the initial identity
-		// read. Attribute the observation to the credentials that actually fetched it.
-		account.AccountID = sample.AccountID
-		account.IdentityKey = sample.IdentityKey
-		history, openErr := s.history(sample.Scope())
-		if openErr != nil {
-			err = openErr
-		} else {
-			err = history.Append(sample)
-		}
-	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
-	info := s.polling[account.Scope()]
+
+	active, accountErr := s.options.Account()
+	scope := ""
+	if accountErr == nil && active.Scope() != "" {
+		scope = active.Scope()
+	}
+	if scope == "" && sample.AccountID != "" {
+		scope = sample.Scope()
+	}
+	if scope == "" {
+		scope = "default"
+	}
+
+	info := s.polling[scope]
 	info.IntervalSeconds = int64(s.options.Interval / time.Second)
 	info.LastAttemptAt = &attempt
 	if err != nil {
-		// Filesystem paths, responses and tokens never enter status errors.
-		info.LastError = "quota observation failed; upstream or history storage unavailable"
+		info.LastError = "quota observation failed; upstream unavailable"
 	} else {
+		s.snapshots[scope] = sample
+		s.available[scope] = true
 		info.LastSuccessAt = &sample.ObservedAt
 		info.LastError = ""
 	}
-	s.polling[account.Scope()] = info
+	s.polling[scope] = info
+
+	if sampleScope := sample.Scope(); sampleScope != "" && sampleScope != scope {
+		s.snapshots[sampleScope] = sample
+		s.available[sampleScope] = true
+		s.polling[sampleScope] = info
+	}
 }
 
+// TriggerPoll signals an immediate polling attempt.
+func (s *Service) TriggerPoll() {
+	select {
+	case s.trigger <- struct{}{}:
+	default:
+	}
+}
+
+// Latest returns the most recent observation, availability flag, and polling info.
 func (s *Service) Latest(accountID string) (quota.Snapshot, bool, PollInfo) {
 	s.mu.Lock()
-	history := s.histories[accountID]
+	defer s.mu.Unlock()
 	info := s.polling[accountID]
-	s.mu.Unlock()
-	info.IntervalSeconds = int64(s.options.Interval / time.Second)
-	if history == nil {
+	if !s.available[accountID] {
 		return quota.Snapshot{}, false, info
 	}
-	latest, available := history.Latest()
-	if !available {
-		return quota.Snapshot{}, false, info
-	}
-	if info.LastSuccessAt == nil {
-		info.LastSuccessAt = &latest.ObservedAt
-	}
-	return latest, true, info
+	return s.snapshots[accountID], true, info
 }
 
+// Stale reports whether the latest snapshot is older than two polling intervals or has an error.
 func (s *Service) Stale(sample quota.Snapshot, polling PollInfo) bool {
 	return polling.LastError != "" || time.Now().After(sample.ObservedAt.Add(s.options.Interval).Add(s.options.Interval))
 }
 
+// Query returns empty results because historical metrics storage is disabled.
 func (s *Service) Query(accountID string, query Query) (Result, error) {
-	history, err := s.history(accountID)
-	if err != nil {
-		return Result{}, err
-	}
-	return queryHistory(history.Samples(), query), nil
+	return Result{Samples: []quota.Snapshot{}}, nil
 }
 
+// Close gracefully stops the worker.
 func (s *Service) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
@@ -228,10 +176,6 @@ func (s *Service) Close() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.closed = true
-		for _, history := range s.histories {
-			s.closeErr = errors.Join(s.closeErr, history.Close())
-		}
-		s.closeErr = errors.Join(s.closeErr, s.lock.Close())
 	})
 	return s.closeErr
 }

@@ -62,20 +62,14 @@ func TestServicePollingStalenessAndAccountIsolation(t *testing.T) {
 	active.Store("account-b")
 	service.TriggerPoll()
 	wait("account-b", false)
-	result, err := service.Query("account-b", Query{Pool: "all", Window: "all", Order: "desc", Limit: 100})
-	if err != nil {
-		t.Fatalf("history query failed: %v", err)
-	}
-	if len(result.Samples) != 1 {
-		t.Fatalf("active account sample count=%d, want 1", len(result.Samples))
-	}
-	if result.Samples[0].AccountID != "account-b" {
-		t.Fatal("history crossed account boundaries")
+	sampleB, availableB, _ := service.Latest("account-b")
+	if !availableB || sampleB.AccountID != "account-b" {
+		t.Fatalf("account-b not available or wrong identity: %+v", sampleB)
 	}
 	if err := service.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Prepare("account-c"); err == nil {
-		t.Fatal("closed service reopened history")
+		t.Fatal("closed service allowed prepare")
 	}
 }

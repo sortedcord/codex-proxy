@@ -657,17 +657,11 @@ func (r *Runtime) activate(
 		PlanType:     identity.PlanType,
 	}
 
-	// Prepare history before persisting
+	// Prepare account before persisting
 	if r.status != nil {
 		if err := r.status.Prepare(identity.Scope()); err != nil {
-			return oauth.Profile{}, oauth.AccountConfigResult{}, errors.New("cannot prepare account quota history")
+			return oauth.Profile{}, oauth.AccountConfigResult{}, errors.New("cannot prepare account quota status")
 		}
-	} else if r.isManagementEnabled() {
-		h, err := status.OpenHistory(r.cfg.HistoryDir, identity.Scope(), r.cfg.HistoryMaxSamples)
-		if err != nil {
-			return oauth.Profile{}, oauth.AccountConfigResult{}, errors.New("cannot prepare account quota history")
-		}
-		_ = h.Close()
 	}
 
 	writeErr := r.persist(r.configPath, func(accounts *[]config.Account) error {

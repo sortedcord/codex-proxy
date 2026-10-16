@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/sortedcord/codex-proxy/internal/config"
 	"github.com/sortedcord/codex-proxy/internal/oauth"
-	"github.com/sortedcord/codex-proxy/internal/status"
 )
 
 func identityJWT(account string) string {
@@ -234,7 +234,7 @@ func TestRuntimeLoginQuotaAndPersistentRestart(t *testing.T) {
 		t.Fatal("login response exposed a refresh token")
 	}
 	awaitQuota(t, runtime, "account-a")
-	for _, path := range []string{"/status/account", "/status/limit", "/status/usage?pool=codex&window=5h&limit=1"} {
+	for _, path := range []string{"/status/account", "/status/limit"} {
 		response := managementRequest(
 			runtime,
 			"GET",
@@ -255,15 +255,6 @@ func TestRuntimeLoginQuotaAndPersistentRestart(t *testing.T) {
 	cfg := runtime.cfg
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
-	}
-	// Open the persisted journal directly: no new network observation is needed.
-	history, err := status.OpenHistory(cfg.HistoryDir, "account-a", cfg.HistoryMaxSamples)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer history.Close()
-	if len(history.Samples()) == 0 {
-		t.Fatal("quota history did not survive restart")
 	}
 	file, err := os.Stat(cfg.AuthFile)
 	if err != nil {
@@ -338,15 +329,12 @@ func TestHotSwitchDoesNotReplayOldRequestUnderNewAccount(t *testing.T) {
 	response := managementRequest(
 		runtime,
 		"GET",
-		"/status/usage",
+		"/status/limit",
 		"",
 		"management-test",
 	)
-	if strings.Contains(response.Body.String(), "account-a") {
-		t.Fatal("prior account leaked into the active history")
-	}
 	if !strings.Contains(response.Body.String(), "account-b") {
-		t.Fatal("replacement account history missing")
+		t.Fatal("replacement account limit missing")
 	}
 	response = managementRequest(
 		runtime,
@@ -365,9 +353,8 @@ func TestFailedHotSwitchPreparationKeepsExistingAccount(t *testing.T) {
 	if response := testLogin(t, runtime, "account-a"); response.Code != 200 {
 		t.Fatal("first login failed")
 	}
-	path := status.HistoryPath(runtime.cfg.HistoryDir, "account-b")
-	if err := os.WriteFile(path, []byte("corrupt-complete-record\n"), 0o600); err != nil {
-		t.Fatal(err)
+	runtime.persist = func(string, func(*[]config.Account) error) error {
+		return errors.New("injected persist failure")
 	}
 	response := testLogin(t, runtime, "account-b")
 	if response.Code != 500 {

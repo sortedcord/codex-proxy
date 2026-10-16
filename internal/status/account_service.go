@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sortedcord/codex-proxy/internal/quota"
-	"github.com/sortedcord/codex-proxy/internal/storage"
 )
 
 // AccountOptions defines configuration for an account-scoped status service.
@@ -21,11 +20,12 @@ type AccountOptions struct {
 	Fetch      func(context.Context) (quota.Snapshot, error)
 }
 
-// AccountService manages background quota polling, durable history, and status endpoints for one account.
+// AccountService manages background quota polling and status endpoints for one account.
 type AccountService struct {
 	mu        sync.Mutex
 	options   AccountOptions
-	history   *History
+	snapshot  quota.Snapshot
+	available bool
 	polling   PollInfo
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -47,22 +47,10 @@ func NewAccountService(ctx context.Context, options AccountOptions) (*AccountSer
 	if options.Interval <= 0 {
 		return nil, errors.New("polling interval must be positive")
 	}
-	if options.MaxSamples <= 0 {
-		options.MaxSamples = storage.MaxHistorySamples
-	}
-	if err := storage.PrivateDir(options.Dir); err != nil {
-		return nil, err
-	}
-
-	history, err := OpenHistory(options.Dir, options.Namespace, options.MaxSamples)
-	if err != nil {
-		return nil, err
-	}
 
 	owned, cancel := context.WithCancel(ctx)
 	svc := &AccountService{
 		options: options,
-		history: history,
 		ctx:     owned,
 		cancel:  cancel,
 		trigger: make(chan struct{}, 1),
@@ -109,13 +97,6 @@ func (s *AccountService) poll() {
 	defer cancel()
 
 	sample, err := s.options.Fetch(ctx)
-	if err == nil {
-		s.mu.Lock()
-		if !s.closed && s.history != nil {
-			err = s.history.Append(sample)
-		}
-		s.mu.Unlock()
-	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -126,8 +107,10 @@ func (s *AccountService) poll() {
 	s.polling.IntervalSeconds = int64(s.options.Interval / time.Second)
 	s.polling.LastAttemptAt = &attempt
 	if err != nil {
-		s.polling.LastError = "quota observation failed; upstream or history storage unavailable"
+		s.polling.LastError = "quota observation failed; upstream unavailable"
 	} else {
+		s.snapshot = sample
+		s.available = true
 		s.polling.LastSuccessAt = &sample.ObservedAt
 		s.polling.LastError = ""
 	}
@@ -138,17 +121,10 @@ func (s *AccountService) Latest() (quota.Snapshot, bool, PollInfo) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	info := s.polling
-	if s.history == nil {
+	if !s.available {
 		return quota.Snapshot{}, false, info
 	}
-	latest, available := s.history.Latest()
-	if !available {
-		return quota.Snapshot{}, false, info
-	}
-	if info.LastSuccessAt == nil {
-		info.LastSuccessAt = &latest.ObservedAt
-	}
-	return latest, true, info
+	return s.snapshot, true, info
 }
 
 // Stale reports whether the latest snapshot is older than two polling intervals or has an error.
@@ -156,17 +132,12 @@ func (s *AccountService) Stale(sample quota.Snapshot, polling PollInfo) bool {
 	return polling.LastError != "" || time.Now().After(sample.ObservedAt.Add(s.options.Interval).Add(s.options.Interval))
 }
 
-// Query filters and paginates history samples.
+// Query returns empty results because historical metrics storage is disabled.
 func (s *AccountService) Query(query Query) (Result, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || s.history == nil {
-		return Result{}, errors.New("history unavailable")
-	}
-	return queryHistory(s.history.Samples(), query), nil
+	return Result{Samples: []quota.Snapshot{}}, nil
 }
 
-// Close gracefully stops the worker and releases history locks.
+// Close gracefully stops the worker.
 func (s *AccountService) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
@@ -174,9 +145,6 @@ func (s *AccountService) Close() error {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.closed = true
-		if s.history != nil {
-			s.closeErr = s.history.Close()
-		}
 	})
 	return s.closeErr
 }
@@ -229,14 +197,7 @@ func (s *AccountService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		result, err := s.Query(query)
-		if err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"error": "quota history is unavailable",
-			})
-			return
-		}
+		result, _ := s.Query(query)
 		_, _, polling := s.Latest()
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(struct {
