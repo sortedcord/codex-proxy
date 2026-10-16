@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,26 +18,75 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sortedcord/codex-proxy/internal/apikey"
 	"github.com/sortedcord/codex-proxy/internal/config"
 	"github.com/sortedcord/codex-proxy/internal/httputil"
 )
 
 var (
-	ErrInvalidState    = errors.New("invalid OAuth state or callback")
-	ErrLoginInProgress = errors.New("login completion already in progress")
-	ErrSessionUsed     = errors.New("login session already used; start a new attempt")
-	ErrSessionExpired  = errors.New("login session expired; start a new attempt")
-	ErrSessionClosed   = errors.New("login service is closed")
-	ErrActivation      = errors.New("account activation failed")
+	ErrInvalidState            = errors.New("invalid OAuth state or callback")
+	ErrLoginInProgress         = errors.New("login completion already in progress")
+	ErrSessionUsed             = errors.New("login session already used; start a new attempt")
+	ErrSessionExpired          = errors.New("login session expired; start a new attempt")
+	ErrSessionClosed           = errors.New("login service is closed")
+	ErrActivation              = errors.New("account activation failed")
+	ErrAccountIdentityMismatch = errors.New("target account belongs to a different ChatGPT account")
+	ErrAccountAlreadyLinked    = errors.New("ChatGPT account is already linked to another proxy account")
+	ErrSessionNotFound         = errors.New("login session not found")
 )
 
+// SessionOptions controls account selection and optional key issuance for an OAuth session.
+type SessionOptions struct {
+	AccountID string `json:"account_id,omitempty"`
+	Replace   bool   `json:"replace,omitempty"`
+	IssueKey  string `json:"issue_key,omitempty"`
+}
+
+// SessionInfo describes a created login session.
+type SessionInfo struct {
+	ID        string    `json:"id"`
+	AuthURL   string    `json:"login_url"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// AccountConfigResult describes the result of committing an account during login.
+type AccountConfigResult struct {
+	AccountID string
+	KeyID     string
+	KeySecret string
+}
+
+// IssuedKey contains a newly generated API key secret for one-time retrieval.
+type IssuedKey struct {
+	ID     string `json:"id"`
+	Label  string `json:"label,omitempty"`
+	Secret string `json:"secret"`
+}
+
+// SessionStatus reports the state of a login session.
+type SessionStatus struct {
+	ID        string     `json:"id"`
+	Status    string     `json:"status"`
+	AuthURL   string     `json:"login_url,omitempty"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	AccountID string     `json:"account_id,omitempty"`
+	Email     string     `json:"email,omitempty"`
+	Name      string     `json:"name,omitempty"`
+	Key       *IssuedKey `json:"key,omitempty"`
+	Error     string     `json:"error,omitempty"`
+}
+
+// ActivateWithOptionsFunc is the extended activation hook called when authorization succeeds.
+type ActivateWithOptionsFunc func(ctx context.Context, opts SessionOptions, tokens Tokens) (Profile, AccountConfigResult, error)
+
 type LoginOptions struct {
-	Client            *http.Client
-	AuthorizeURL      string
-	TokenURL          string
-	CallbackAddresses []string
-	Lifetime          time.Duration
-	Activate          func(context.Context, Tokens) (Profile, error)
+	Client              *http.Client
+	AuthorizeURL        string
+	TokenURL            string
+	CallbackAddresses   []string
+	Lifetime            time.Duration
+	Activate            func(context.Context, Tokens) (Profile, error)
+	ActivateWithOptions ActivateWithOptionsFunc
 }
 
 type LoginInfo struct {
@@ -46,6 +96,8 @@ type LoginInfo struct {
 }
 
 type loginSession struct {
+	id          string
+	opts        SessionOptions
 	state       string
 	verifier    string
 	redirectURI string
@@ -53,12 +105,19 @@ type loginSession struct {
 	listener    net.Listener
 	server      *http.Server
 	timer       *time.Timer
+	status      string
+	accountID   string
+	email       string
+	name        string
+	key         *IssuedKey
+	err         string
 }
 
 type SessionManager struct {
 	mu        sync.Mutex
 	options   LoginOptions
 	active    *loginSession
+	sessions  map[string]*loginSession
 	ctx       context.Context
 	cancel    context.CancelFunc
 	work      sync.WaitGroup
@@ -67,8 +126,15 @@ type SessionManager struct {
 }
 
 func NewSessionManager(ctx context.Context, options LoginOptions) (*SessionManager, error) {
-	if ctx == nil || options.Client == nil || options.Activate == nil {
+	if ctx == nil || options.Client == nil || (options.Activate == nil && options.ActivateWithOptions == nil) {
 		return nil, errors.New("login lifecycle, client and activation callback are required")
+	}
+	if options.ActivateWithOptions == nil && options.Activate != nil {
+		oldActivate := options.Activate
+		options.ActivateWithOptions = func(ctx context.Context, opts SessionOptions, tokens Tokens) (Profile, AccountConfigResult, error) {
+			prof, err := oldActivate(ctx, tokens)
+			return prof, AccountConfigResult{AccountID: prof.AccountID}, err
+		}
 	}
 	if options.AuthorizeURL == "" {
 		options.AuthorizeURL = "https://auth.openai.com/oauth/authorize"
@@ -77,8 +143,6 @@ func NewSessionManager(ctx context.Context, options LoginOptions) (*SessionManag
 		options.TokenURL = DefaultTokenURL
 	}
 	if len(options.CallbackAddresses) == 0 {
-		// OpenAI's Codex client allowlists these ports; arbitrary ephemeral ports
-		// are only supplied by tests with a fake authorization server.
 		options.CallbackAddresses = []string{"127.0.0.1:1455", "127.0.0.1:1457"}
 	}
 	if options.Lifetime == 0 {
@@ -96,7 +160,12 @@ func NewSessionManager(ctx context.Context, options LoginOptions) (*SessionManag
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	options.Client = &client
 	owned, cancel := context.WithCancel(ctx)
-	return &SessionManager{options: options, ctx: owned, cancel: cancel}, nil
+	return &SessionManager{
+		options:  options,
+		sessions: make(map[string]*loginSession),
+		ctx:      owned,
+		cancel:   cancel,
+	}, nil
 }
 
 func randomString() (string, error) {
@@ -105,6 +174,14 @@ func randomString() (string, error) {
 		return "", errors.New("cannot create OAuth entropy")
 	}
 	return base64.RawURLEncoding.EncodeToString(bytes[:]), nil
+}
+
+func generateSessionID() (string, error) {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", errors.New("cannot generate session ID")
+	}
+	return "sess_" + hex.EncodeToString(buf[:]), nil
 }
 
 func bindCallbackListener(addresses []string) (net.Listener, error) {
@@ -138,42 +215,61 @@ func buildAuthorizeURL(authorizeURL, redirectURI, state, verifier string) string
 	return authorizeURL + "?" + parameters.Encode()
 }
 
-func (m *SessionManager) Begin(ctx context.Context) (LoginInfo, error) {
+// BeginWithOptions initiates a login attempt with custom session options.
+func (m *SessionManager) BeginWithOptions(ctx context.Context, opts SessionOptions) (SessionInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed || m.ctx.Err() != nil {
-		return LoginInfo{}, ErrSessionClosed
+		return SessionInfo{}, ErrSessionClosed
 	}
 	if err := ctx.Err(); err != nil {
-		return LoginInfo{}, err
+		return SessionInfo{}, err
 	}
-	if session := m.active; session != nil {
-		if session.info.Status == "exchanging" {
-			return LoginInfo{}, ErrLoginInProgress
+
+	now := time.Now()
+	if m.active != nil {
+		if m.active.info.Status == "exchanging" {
+			return SessionInfo{}, ErrLoginInProgress
 		}
-		if session.info.Status == "pending" && time.Now().Before(session.info.ExpiresAt) {
-			return session.info, nil
+		if m.active.info.Status == "pending" && now.Before(m.active.info.ExpiresAt) {
+			if m.active.opts == opts {
+				return SessionInfo{
+					ID:        m.active.id,
+					AuthURL:   m.active.info.LoginURL,
+					ExpiresAt: m.active.info.ExpiresAt,
+				}, nil
+			}
+			return SessionInfo{}, ErrLoginInProgress
 		}
-		m.cleanup(session)
+		m.cleanup(m.active)
+		m.active = nil
 	}
+
 	state, err := randomString()
 	if err != nil {
-		return LoginInfo{}, err
+		return SessionInfo{}, err
 	}
 	verifier, err := randomString()
 	if err != nil {
-		return LoginInfo{}, err
+		return SessionInfo{}, err
+	}
+	sid, err := generateSessionID()
+	if err != nil {
+		return SessionInfo{}, err
 	}
 	listener, err := bindCallbackListener(m.options.CallbackAddresses)
 	if err != nil {
-		return LoginInfo{}, err
+		return SessionInfo{}, err
 	}
 	redirectURI := "http://" + listener.Addr().String() + "/auth/callback"
 	session := &loginSession{
+		id:          sid,
+		opts:        opts,
 		state:       state,
 		verifier:    verifier,
 		redirectURI: redirectURI,
 		listener:    listener,
+		status:      "pending",
 		info: LoginInfo{
 			LoginURL:  buildAuthorizeURL(m.options.AuthorizeURL, redirectURI, state, verifier),
 			ExpiresAt: time.Now().UTC().Add(m.options.Lifetime),
@@ -191,31 +287,83 @@ func (m *SessionManager) Begin(ctx context.Context) (LoginInfo, error) {
 		MaxHeaderBytes:    8 << 10,
 	}
 	session.server.SetKeepAlivesEnabled(false)
-	m.active = session
+
 	session.timer = time.AfterFunc(m.options.Lifetime, func() {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if session.info.Status == "pending" {
 			session.info.Status = "expired"
+			session.status = "expired"
 			m.cleanup(session)
 		}
 	})
+
+	m.active = session
+	m.sessions[sid] = session
+
 	m.work.Add(1)
 	go func() { defer m.work.Done(); _ = session.server.Serve(listener) }()
-	return session.info, nil
+
+	return SessionInfo{
+		ID:        sid,
+		AuthURL:   session.info.LoginURL,
+		ExpiresAt: session.info.ExpiresAt,
+	}, nil
+}
+
+// Begin initiates a default login attempt for backward compatibility.
+func (m *SessionManager) Begin(ctx context.Context) (LoginInfo, error) {
+	info, err := m.BeginWithOptions(ctx, SessionOptions{})
+	if err != nil {
+		return LoginInfo{}, err
+	}
+	return LoginInfo{
+		LoginURL:  info.AuthURL,
+		ExpiresAt: info.ExpiresAt,
+		Status:    "pending",
+	}, nil
 }
 
 func (m *SessionManager) cleanup(session *loginSession) {
 	if session.timer != nil {
 		session.timer.Stop()
 	}
-	// Stop accepting without killing the current browser's success response.
 	if session.listener != nil {
 		_ = session.listener.Close()
 	}
 }
 
-func (m *SessionManager) claimSession(ctx context.Context, code, state string) (*loginSession, error) {
+// GetSession returns the current status and metadata of a login session.
+func (m *SessionManager) GetSession(id string) (SessionStatus, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[id]
+	if !ok {
+		return SessionStatus{}, false
+	}
+	return SessionStatus{
+		ID:        sess.id,
+		Status:    sess.status,
+		AuthURL:   sess.info.LoginURL,
+		ExpiresAt: sess.info.ExpiresAt,
+		AccountID: sess.accountID,
+		Email:     sess.email,
+		Name:      sess.name,
+		Key:       sess.key,
+		Error:     sess.err,
+	}, true
+}
+
+// ConsumeSessionKey clears an issued API key from the session after retrieval.
+func (m *SessionManager) ConsumeSessionKey(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sess, ok := m.sessions[id]; ok {
+		sess.key = nil
+	}
+}
+
+func (m *SessionManager) claimSessionByID(ctx context.Context, sessionID, state string) (*loginSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed || m.ctx.Err() != nil {
@@ -224,7 +372,16 @@ func (m *SessionManager) claimSession(ctx context.Context, code, state string) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	session := m.active
+	var session *loginSession
+	if sessionID != "" {
+		var ok bool
+		session, ok = m.sessions[sessionID]
+		if !ok {
+			return nil, ErrSessionNotFound
+		}
+	} else {
+		session = m.active
+	}
 	if session == nil || subtle.ConstantTimeCompare([]byte(session.state), []byte(state)) != 1 {
 		return nil, ErrInvalidState
 	}
@@ -234,47 +391,80 @@ func (m *SessionManager) claimSession(ctx context.Context, code, state string) (
 	expired := session.info.Status == "expired" || time.Now().After(session.info.ExpiresAt)
 	if expired {
 		session.info.Status = "expired"
+		session.status = "expired"
 		m.cleanup(session)
 		return nil, ErrSessionExpired
 	}
 	if session.info.Status != "pending" {
 		return nil, ErrSessionUsed
 	}
-	if code == "" || len(code) > 8192 {
-		return nil, ErrInvalidState
-	}
 	session.info.Status = "exchanging"
+	session.status = "exchanging"
 	m.cleanup(session)
 	m.work.Add(1)
 	return session, nil
 }
 
-func (m *SessionManager) Complete(ctx context.Context, code, state string) (Profile, error) {
-	session, err := m.claimSession(ctx, code, state)
+// CompleteWithSessionID completes the OAuth exchange for a specific session ID.
+func (m *SessionManager) CompleteWithSessionID(ctx context.Context, sessionID, code, state string) (Profile, AccountConfigResult, error) {
+	if code == "" || len(code) > 8192 {
+		return Profile{}, AccountConfigResult{}, ErrInvalidState
+	}
+	session, err := m.claimSessionByID(ctx, sessionID, state)
 	if err != nil {
-		return Profile{}, err
+		return Profile{}, AccountConfigResult{}, err
 	}
 	defer m.work.Done()
-	// Once a one-time code is posted, client disconnects must not abandon a
-	// successful exchange/save. Shutdown still cancels and joins this bounded work.
+
 	exchangeCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 	defer cancel()
+
 	tokens, err := m.exchange(exchangeCtx, session, code)
 	var identity Profile
+	var result AccountConfigResult
 	if err == nil {
-		identity, err = m.options.Activate(exchangeCtx, tokens)
+		identity, result, err = m.options.ActivateWithOptions(exchangeCtx, session.opts, tokens)
 		if err != nil && !identity.CredentialConfigured {
 			err = errors.Join(ErrActivation, err)
 		}
 	}
+
 	m.mu.Lock()
 	if identity.CredentialConfigured {
 		session.info.Status = "completed"
+		session.status = "configured"
+		session.accountID = result.AccountID
+		session.email = identity.Email
+		session.name = identity.Name
+		if result.KeySecret != "" {
+			session.key = &IssuedKey{
+				ID:     result.KeyID,
+				Label:  session.opts.IssueKey,
+				Secret: result.KeySecret,
+			}
+		}
 	} else {
 		session.info.Status = "failed"
+		session.status = "failed"
+		if err != nil {
+			session.err = err.Error()
+		}
 	}
 	m.mu.Unlock()
-	return identity, err
+
+	return identity, result, err
+}
+
+func (m *SessionManager) Complete(ctx context.Context, code, state string) (Profile, error) {
+	m.mu.Lock()
+	activeID := ""
+	if m.active != nil {
+		activeID = m.active.id
+	}
+	m.mu.Unlock()
+
+	prof, _, err := m.CompleteWithSessionID(ctx, activeID, code, state)
+	return prof, err
 }
 
 func (m *SessionManager) exchange(ctx context.Context, session *loginSession, code string) (Tokens, error) {
@@ -366,6 +556,8 @@ func (m *SessionManager) callback(session *loginSession, w http.ResponseWriter, 
 		m.mu.Lock()
 		if session.info.Status == "pending" {
 			session.info.Status = "failed"
+			session.status = "failed"
+			session.err = "authorization declined"
 			m.cleanup(session)
 		}
 		m.mu.Unlock()
@@ -376,7 +568,7 @@ func (m *SessionManager) callback(session *loginSession, w http.ResponseWriter, 
 		http.Error(w, "Invalid callback code", http.StatusBadRequest)
 		return
 	}
-	identity, err := m.Complete(r.Context(), values.Get("code"), values.Get("state"))
+	identity, _, err := m.CompleteWithSessionID(r.Context(), session.id, values.Get("code"), values.Get("state"))
 	if err != nil {
 		message := "Authorization failed. Start a new login attempt."
 		if identity.CredentialConfigured {
@@ -388,19 +580,179 @@ func (m *SessionManager) callback(session *loginSession, w http.ResponseWriter, 
 	_, _ = io.WriteString(w, "Authorization complete. You may close this tab and return to the proxy.\n")
 }
 
+// LoginWithOptions authorizes ChatGPT credentials through a loopback callback using PKCE
+// and state validation with custom session options, then saves them to path.
+func LoginWithOptions(cfg config.Config, path string, opts SessionOptions, output io.Writer) error {
+	client := &http.Client{Timeout: 30 * time.Second}
+	var mintedResult AccountConfigResult
+
+	manager, err := NewSessionManager(context.Background(), LoginOptions{
+		Client: client,
+		ActivateWithOptions: func(ctx context.Context, sessionOpts SessionOptions, tokens Tokens) (Profile, AccountConfigResult, error) {
+			if err := ctx.Err(); err != nil {
+				return Profile{}, AccountConfigResult{}, err
+			}
+			identity, err := tokens.Profile()
+			if err != nil {
+				return Profile{}, AccountConfigResult{}, err
+			}
+
+			var mintedSecret, mintedKeyID string
+			var newKey *config.AccountKey
+			if sessionOpts.IssueKey != "" {
+				var genErr error
+				mintedSecret, genErr = apikey.Generate()
+				if genErr != nil {
+					return Profile{}, AccountConfigResult{}, genErr
+				}
+				mintedKeyID, genErr = apikey.GenerateID()
+				if genErr != nil {
+					return Profile{}, AccountConfigResult{}, genErr
+				}
+				newKey = &config.AccountKey{
+					ID:        mintedKeyID,
+					Label:     sessionOpts.IssueKey,
+					Hash:      apikey.Hash(mintedSecret),
+					Last4:     apikey.Last4(mintedSecret),
+					CreatedAt: time.Now().UTC(),
+				}
+			}
+
+			targetID := sessionOpts.AccountID
+			creds := config.Credentials{
+				AccessToken:  tokens.AccessToken,
+				RefreshToken: tokens.RefreshToken,
+				IDToken:      tokens.IDToken,
+				AccountID:    identity.AccountID,
+				AccountEmail: identity.Email,
+				AccountName:  identity.Name,
+				PlanType:     identity.PlanType,
+			}
+
+			err = config.UpdateAccounts(path, func(accounts *[]config.Account) error {
+				if targetID == "" {
+					for _, da := range *accounts {
+						if da.AccountID == identity.AccountID {
+							targetID = da.ID
+							break
+						}
+					}
+					if targetID == "" {
+						if len(*accounts) == 0 || (len(*accounts) == 1 && (*accounts)[0].ID == "default") {
+							targetID = "default"
+						} else {
+							existingIDs := make([]string, 0, len(*accounts))
+							for _, da := range *accounts {
+								existingIDs = append(existingIDs, da.ID)
+							}
+							targetID = config.DeriveAccountID(identity.Email, existingIDs)
+						}
+					}
+				}
+
+				for _, da := range *accounts {
+					if da.AccountID == identity.AccountID && da.ID != targetID {
+						return ErrAccountAlreadyLinked
+					}
+					if da.ID == targetID && da.AccountID != "" && da.AccountID != identity.AccountID && !sessionOpts.Replace {
+						return ErrAccountIdentityMismatch
+					}
+				}
+
+				for i := range *accounts {
+					if (*accounts)[i].ID == targetID {
+						(*accounts)[i].ApplyCredentials(creds)
+						if newKey != nil {
+							(*accounts)[i].Keys = append((*accounts)[i].Keys, *newKey)
+						}
+						return nil
+					}
+				}
+				var keys []config.AccountKey
+				if newKey != nil {
+					keys = append(keys, *newKey)
+				}
+				newAcc := config.Account{
+					ID:      targetID,
+					Label:   targetID,
+					Enabled: true,
+					Keys:    keys,
+				}
+				newAcc.ApplyCredentials(creds)
+				*accounts = append(*accounts, newAcc)
+				return nil
+			})
+			if err != nil {
+				return Profile{}, AccountConfigResult{}, err
+			}
+
+			res := AccountConfigResult{
+				AccountID: targetID,
+				KeyID:     mintedKeyID,
+				KeySecret: mintedSecret,
+			}
+			mintedResult = res
+			return identity, res, nil
+		},
+	})
+	if err != nil {
+		return err
+	}
+	defer manager.Close()
+
+	info, err := manager.BeginWithOptions(context.Background(), opts)
+	if err != nil {
+		return err
+	}
+
+	_, _ = fmt.Fprintln(output, "Open this URL in your browser to authorize Codex Proxy:")
+	_, _ = fmt.Fprintf(output, "\n  %s\n\n", info.AuthURL)
+	_, _ = fmt.Fprintln(output, "Waiting for browser authorization callback...")
+
+	for {
+		time.Sleep(500 * time.Millisecond)
+		sess, ok := manager.GetSession(info.ID)
+		if !ok || sess.Status == "failed" {
+			errMsg := sess.Error
+			if errMsg == "" {
+				errMsg = "authorization failed"
+			}
+			return errors.New(errMsg)
+		}
+		if sess.Status == "expired" {
+			return errors.New("authorization session expired")
+		}
+		if sess.Status == "configured" {
+			_, _ = fmt.Fprintf(output, "Account %q configured successfully.\n", mintedResult.AccountID)
+			if mintedResult.KeySecret != "" {
+				_, _ = fmt.Fprintf(output, "\nCreated API key for account %q:\n", mintedResult.AccountID)
+				_, _ = fmt.Fprintf(output, "  Key:   %s\n", mintedResult.KeySecret)
+				_, _ = fmt.Fprintf(output, "  ID:    %s\n", mintedResult.KeyID)
+				if opts.IssueKey != "" {
+					_, _ = fmt.Fprintf(output, "  Label: %s\n", opts.IssueKey)
+				}
+				_, _ = fmt.Fprintln(output, "\nSave this secret key now - it cannot be displayed again.")
+			}
+			return nil
+		}
+	}
+}
+
 func (m *SessionManager) Close() {
 	m.closeOnce.Do(func() {
 		m.mu.Lock()
 		m.closed = true
 		m.cancel()
-		var server *http.Server
-		if m.active != nil {
-			m.cleanup(m.active)
-			server = m.active.server
+		servers := make([]*http.Server, 0, len(m.sessions))
+		for _, s := range m.sessions {
+			m.cleanup(s)
+			if s.server != nil {
+				servers = append(servers, s.server)
+			}
 		}
 		m.mu.Unlock()
-		if server != nil {
-			_ = server.Close()
+		for _, srv := range servers {
+			_ = srv.Close()
 		}
 		m.work.Wait()
 	})

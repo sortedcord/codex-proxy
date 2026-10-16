@@ -49,6 +49,18 @@ type Tokens struct {
 }
 
 func (a *Manager) Profile() (Profile, error) {
+	if a.docProvider != nil {
+		if cached := a.published.Load(); cached != nil {
+			return cached.profile, nil
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		doc, err := a.load()
+		if err != nil {
+			return Profile{}, ErrUnavailable
+		}
+		return doc.profile, nil
+	}
 	body, err := readAuthBody(a.path)
 	if err != nil {
 		return Profile{}, ErrUnavailable

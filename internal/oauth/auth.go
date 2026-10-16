@@ -30,6 +30,7 @@ var ErrUnavailable = errors.New("Codex credentials are not configured or are una
 type Credentials struct {
 	AccessToken  string    `json:"-"`
 	RefreshToken string    `json:"-"`
+	IDToken      string    `json:"-"`
 	AccountID    string    `json:"account_id"`
 	IdentityKey  string    `json:"-"`
 	Generation   uint64    `json:"-"`
@@ -60,12 +61,51 @@ type Manager struct {
 	cachedHash   [sha256.Size]byte
 	cacheValid   bool
 	published    atomic.Pointer[profileSnapshot]
+	docProvider  func() (authDocument, error)
+	tokenSaver   func(Tokens) error
 }
 
 // Non-secret immutable state lets cached status reads bypass an in-flight refresh.
 type profileSnapshot struct {
 	digest  [sha256.Size]byte
 	profile Profile
+}
+
+// NewAccountManager creates a Manager backed by in-memory credentials and a persistence hook.
+func NewAccountManager(creds Credentials, client *http.Client, tokenURL string, saver func(Tokens) error) (*Manager, error) {
+	if client == nil {
+		return nil, errors.New("OAuth HTTP client is required")
+	}
+	if tokenURL == "" {
+		tokenURL = DefaultTokenURL
+	}
+	prof := profile(creds.AccountID, creds.IDToken, creds.AccessToken)
+	creds.IdentityKey = prof.Scope()
+	creds.expiresAt = tokenExpiry(creds.AccessToken)
+	creds.Generation = 1
+	doc := authDocument{
+		root:    map[string]json.RawMessage{},
+		tokens:  map[string]json.RawMessage{},
+		creds:   creds,
+		profile: prof,
+	}
+	m := &Manager{
+		accountID:   creds.AccountID,
+		identityKey: creds.IdentityKey,
+		generation:  1,
+		client:      client,
+		tokenURL:    tokenURL,
+		tokenSaver:  saver,
+		cachedDoc:   doc,
+		cacheValid:  true,
+		persist:     atomicWrite,
+	}
+	m.published.Store(&profileSnapshot{profile: prof})
+	m.docProvider = func() (authDocument, error) {
+		m.cachedDoc.creds.Generation = m.generation
+		return m.cachedDoc, nil
+	}
+	return m, nil
 }
 
 func NewManager(path string, client *http.Client, tokenURL string) (*Manager, error) {
@@ -167,6 +207,9 @@ func (a *Manager) Fresh(ctx context.Context, snapshot Credentials) (Credentials,
 }
 
 func (a *Manager) load() (authDocument, error) {
+	if a.docProvider != nil {
+		return a.docProvider()
+	}
 	body, err := readAuthBody(a.path)
 	if err != nil {
 		return authDocument{}, err
@@ -269,6 +312,37 @@ func (a *Manager) refresh(doc authDocument) (Credentials, error) {
 	if err := json.Unmarshal(body, &update); err != nil || update.AccessToken == "" {
 		return Credentials{}, errors.New("invalid Codex token refresh response")
 	}
+	if a.tokenSaver != nil {
+		newTokens := Tokens{
+			AccessToken:  update.AccessToken,
+			RefreshToken: update.RefreshToken,
+			IDToken:      update.IDToken,
+		}
+		if newTokens.RefreshToken == "" {
+			newTokens.RefreshToken = doc.creds.RefreshToken
+		}
+		if newTokens.IDToken == "" {
+			newTokens.IDToken = doc.creds.IDToken
+		}
+		if err := a.tokenSaver(newTokens); err != nil {
+			return Credentials{}, fmt.Errorf("cannot persist refreshed Codex credentials: %w", err)
+		}
+		a.cachedDoc.creds.AccessToken = newTokens.AccessToken
+		a.cachedDoc.creds.RefreshToken = newTokens.RefreshToken
+		if newTokens.IDToken != "" {
+			a.cachedDoc.creds.IDToken = newTokens.IDToken
+		}
+		a.cachedDoc.creds.expiresAt = tokenExpiry(newTokens.AccessToken)
+		a.cachedDoc.profile = profile(a.cachedDoc.creds.AccountID, a.cachedDoc.creds.IDToken, a.cachedDoc.creds.AccessToken)
+		a.cachedDoc.creds.IdentityKey = a.cachedDoc.profile.Scope()
+		a.published.Store(&profileSnapshot{profile: a.cachedDoc.profile})
+		a.cacheValid = true
+		a.failedToken = ""
+		a.failedAccess = ""
+		a.refreshError = nil
+		return a.cachedDoc.creds, nil
+	}
+
 	setJSON(latest.tokens, "access_token", update.AccessToken)
 	if update.RefreshToken != "" {
 		setJSON(latest.tokens, "refresh_token", update.RefreshToken)
@@ -334,6 +408,7 @@ func parseAuth(body []byte) (authDocument, error) {
 	}
 	doc.creds.AccessToken = jsonString(doc.tokens["access_token"])
 	doc.creds.RefreshToken = jsonString(doc.tokens["refresh_token"])
+	doc.creds.IDToken = jsonString(doc.tokens["id_token"])
 	doc.creds.AccountID = jsonString(doc.tokens["account_id"])
 	if doc.creds.AccountID == "" {
 		claims := jwtClaims(jsonString(doc.tokens["id_token"]))
