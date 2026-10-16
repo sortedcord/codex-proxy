@@ -38,7 +38,15 @@ func NewAccountService(ctx context.Context, options AccountOptions) (*AccountSer
 		return nil, errors.New("polling interval must be positive")
 	}
 
-	p, err := poller.New(options.Interval, options.Fetch, func(s quota.Snapshot) time.Time {
+	p, err := poller.New(options.Interval, func(fetchCtx context.Context) (quota.Snapshot, error) {
+		timeoutCtx, cancel := context.WithTimeout(fetchCtx, 30*time.Second)
+		defer cancel()
+		sample, err := options.Fetch(timeoutCtx)
+		if err != nil {
+			return quota.Snapshot{}, errors.New("quota observation failed; upstream unavailable")
+		}
+		return sample, nil
+	}, func(s quota.Snapshot) time.Time {
 		return s.ObservedAt
 	})
 	if err != nil {

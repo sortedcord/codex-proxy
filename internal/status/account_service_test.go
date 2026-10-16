@@ -2,9 +2,11 @@ package status
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,5 +76,47 @@ func TestAccountServiceLifecycleAndHTTP(t *testing.T) {
 	svc.ServeHTTP(w, req)
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /status/limit returned %d, want 405", w.Code)
+	}
+}
+
+func TestAccountServiceSanitizesFetchErrorAndEnforcesTimeout(t *testing.T) {
+	var timeoutObserved bool
+	fetch := func(ctx context.Context) (quota.Snapshot, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 31*time.Second {
+			timeoutObserved = false
+		} else {
+			timeoutObserved = true
+		}
+		return quota.Snapshot{}, errors.New("private upstream database secret connection refused")
+	}
+
+	svc, err := NewAccountService(context.Background(), AccountOptions{
+		Namespace: "test-err",
+		Interval:  time.Hour,
+		Fetch:     fetch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		_, _, info := svc.Latest()
+		if info.LastError != "" {
+			if strings.Contains(info.LastError, "private upstream database") {
+				t.Fatalf("private error details leaked: %s", info.LastError)
+			}
+			if info.LastError != "quota observation failed; upstream unavailable" {
+				t.Fatalf("unexpected sanitized error: %s", info.LastError)
+			}
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if !timeoutObserved {
+		t.Fatal("per-poll timeout was not applied to fetch context")
 	}
 }
