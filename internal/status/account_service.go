@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/sortedcord/codex-proxy/internal/quota"
+	"github.com/terastal-hq/proxylib/poller"
 )
 
 // AccountOptions defines configuration for an account-scoped status service.
@@ -22,18 +22,8 @@ type AccountOptions struct {
 
 // AccountService manages background quota polling and status endpoints for one account.
 type AccountService struct {
-	mu        sync.Mutex
-	options   AccountOptions
-	snapshot  quota.Snapshot
-	available bool
-	polling   PollInfo
-	ctx       context.Context
-	cancel    context.CancelFunc
-	trigger   chan struct{}
-	done      chan struct{}
-	closeOnce sync.Once
-	closeErr  error
-	closed    bool
+	options AccountOptions
+	poller  *poller.Poller[quota.Snapshot]
 }
 
 // NewAccountService constructs and starts an account-scoped quota status service.
@@ -48,88 +38,34 @@ func NewAccountService(ctx context.Context, options AccountOptions) (*AccountSer
 		return nil, errors.New("polling interval must be positive")
 	}
 
-	owned, cancel := context.WithCancel(ctx)
-	svc := &AccountService{
-		options: options,
-		ctx:     owned,
-		cancel:  cancel,
-		trigger: make(chan struct{}, 1),
-		done:    make(chan struct{}),
+	p, err := poller.New(options.Interval, options.Fetch, func(s quota.Snapshot) time.Time {
+		return s.ObservedAt
+	})
+	if err != nil {
+		return nil, err
 	}
-	svc.polling.IntervalSeconds = int64(options.Interval / time.Second)
-
-	go svc.run()
-	return svc, nil
+	if err := p.Start(ctx); err != nil {
+		return nil, err
+	}
+	return &AccountService{
+		options: options,
+		poller:  p,
+	}, nil
 }
 
 // TriggerPoll signals an immediate polling attempt.
 func (s *AccountService) TriggerPoll() {
-	select {
-	case s.trigger <- struct{}{}:
-	default:
-	}
-}
-
-func (s *AccountService) run() {
-	defer close(s.done)
-	ticker := time.NewTicker(s.options.Interval)
-	defer ticker.Stop()
-
-	s.poll()
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			s.poll()
-		case <-s.trigger:
-			s.poll()
-		}
-	}
-}
-
-func (s *AccountService) poll() {
-	if s.ctx.Err() != nil {
-		return
-	}
-	attempt := time.Now().UTC()
-	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
-	defer cancel()
-
-	sample, err := s.options.Fetch(ctx)
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-
-	s.polling.IntervalSeconds = int64(s.options.Interval / time.Second)
-	s.polling.LastAttemptAt = &attempt
-	if err != nil {
-		s.polling.LastError = "quota observation failed; upstream unavailable"
-	} else {
-		s.snapshot = sample
-		s.available = true
-		s.polling.LastSuccessAt = &sample.ObservedAt
-		s.polling.LastError = ""
-	}
+	s.poller.TriggerPoll()
 }
 
 // Latest returns the most recent observation, availability flag, and polling info.
 func (s *AccountService) Latest() (quota.Snapshot, bool, PollInfo) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	info := s.polling
-	if !s.available {
-		return quota.Snapshot{}, false, info
-	}
-	return s.snapshot, true, info
+	return s.poller.Latest()
 }
 
 // Stale reports whether the latest snapshot is older than two polling intervals or has an error.
 func (s *AccountService) Stale(sample quota.Snapshot, polling PollInfo) bool {
-	return polling.LastError != "" || time.Now().After(sample.ObservedAt.Add(s.options.Interval).Add(s.options.Interval))
+	return s.poller.Stale(sample.ObservedAt, polling)
 }
 
 // Query returns empty results because historical metrics storage is disabled.
@@ -139,14 +75,7 @@ func (s *AccountService) Query(query Query) (Result, error) {
 
 // Close gracefully stops the worker.
 func (s *AccountService) Close() error {
-	s.closeOnce.Do(func() {
-		s.cancel()
-		<-s.done
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.closed = true
-	})
-	return s.closeErr
+	return s.poller.Close()
 }
 
 // ServeHTTP serves /status/limit and /status/usage for this account.

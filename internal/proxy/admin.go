@@ -18,16 +18,15 @@ import (
 	"github.com/sortedcord/codex-proxy/internal/quota"
 	"github.com/sortedcord/codex-proxy/internal/status"
 	"github.com/sortedcord/codex-proxy/internal/storage"
+	"github.com/terastal-hq/proxylib/httpx"
 )
 
 func writeAdminJSON(w http.ResponseWriter, code int, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(data)
+	httpx.WriteJSON(w, code, data)
 }
 
 func writeAdminError(w http.ResponseWriter, code int, msg string) {
-	writeAdminJSON(w, code, map[string]string{"error": msg})
+	httpx.WriteError(w, code, msg)
 }
 
 func writePersistError(w http.ResponseWriter, err error) {

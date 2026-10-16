@@ -8,14 +8,10 @@ import (
 
 	"github.com/sortedcord/codex-proxy/internal/oauth"
 	"github.com/sortedcord/codex-proxy/internal/quota"
+	"github.com/terastal-hq/proxylib/poller"
 )
 
-type PollInfo struct {
-	IntervalSeconds int64      `json:"interval_seconds"`
-	LastAttemptAt   *time.Time `json:"last_attempt_at"`
-	LastSuccessAt   *time.Time `json:"last_success_at"`
-	LastError       string     `json:"last_error,omitempty"`
-}
+type PollInfo = poller.PollInfo
 
 type Options struct {
 	Dir        string
@@ -160,7 +156,7 @@ func (s *Service) Latest(accountID string) (quota.Snapshot, bool, PollInfo) {
 
 // Stale reports whether the latest snapshot is older than two polling intervals or has an error.
 func (s *Service) Stale(sample quota.Snapshot, polling PollInfo) bool {
-	return polling.LastError != "" || time.Now().After(sample.ObservedAt.Add(s.options.Interval).Add(s.options.Interval))
+	return poller.IsStale(sample.ObservedAt, s.options.Interval, polling.LastError, time.Now())
 }
 
 // Query returns empty results because historical metrics storage is disabled.

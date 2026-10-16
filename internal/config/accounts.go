@@ -3,7 +3,6 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,11 +11,12 @@ import (
 
 	"github.com/sortedcord/codex-proxy/internal/apikey"
 	"github.com/terastal-hq/proxylib/accountid"
+	"github.com/terastal-hq/proxylib/configfile"
 )
 
 // ErrUnloadableConfig means an account update was rejected because the resulting
 // configuration would fail the same validation Load applies at startup.
-var ErrUnloadableConfig = errors.New("change rejected: the resulting configuration would not load at startup")
+var ErrUnloadableConfig = configfile.ErrUnloadableConfig
 
 // Credentials represents a complete token and account identity replacement.
 type Credentials struct {
@@ -139,20 +139,18 @@ func ReadDiskAccounts(path string) ([]Account, error) {
 	return disk.Accounts, nil
 }
 
+var legacyCredentialKeys = []string{
+	"accessToken", "refreshToken", "idToken", "accountId",
+	"accountEmail", "accountName", "apiKey", "planType",
+}
+
 // UpdateAccounts reads the configuration at path, applies update to the accounts,
 // validates the result, and durably persists it while stripping legacy flat credential fields.
 func UpdateAccounts(path string, update func(accounts *[]Account) error) error {
 	var disk Config
-	data, err := readConfigFile(path, &disk)
+	_, err := readConfigFile(path, &disk)
 	if err != nil && !os.IsNotExist(err) {
 		return err
-	}
-
-	fields := make(map[string]json.RawMessage)
-	if len(data) != 0 {
-		if err := json.Unmarshal(data, &fields); err != nil {
-			return fmt.Errorf("read saved accounts: %w", err)
-		}
 	}
 
 	accounts := disk.Accounts
@@ -168,62 +166,29 @@ func UpdateAccounts(path string, update func(accounts *[]Account) error) error {
 		return fmt.Errorf("validate accounts: %w", err)
 	}
 
-	accountsJSON, err := json.MarshalIndent(accounts, "  ", "  ")
-	if err != nil {
-		return fmt.Errorf("encode accounts: %w", err)
-	}
-	fields["accounts"] = accountsJSON
-
-	// Strip legacy credential fields from disk on update
-	legacyKeys := []string{
-		"accessToken", "refreshToken", "idToken", "accountId",
-		"accountEmail", "accountName", "apiKey", "planType",
-	}
-	for _, lk := range legacyKeys {
-		for key := range fields {
-			if strings.EqualFold(key, lk) {
-				delete(fields, key)
-			}
+	return configfile.Patch(path, func(fields map[string]json.RawMessage) error {
+		accountsJSON, err := json.MarshalIndent(accounts, "  ", "  ")
+		if err != nil {
+			return fmt.Errorf("encode accounts: %w", err)
 		}
-	}
-
-	outData, err := json.MarshalIndent(fields, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode config: %w", err)
-	}
-	if err := validateAsLoaded(outData, filepath.Dir(path)); err != nil {
-		return fmt.Errorf("%w: %v", ErrUnloadableConfig, err)
-	}
-
-	return saveConfigBytes(path, outData)
+		fields["accounts"] = accountsJSON
+		configfile.StripKeys(fields, legacyCredentialKeys...)
+		return nil
+	}, func(candidate []byte) error {
+		return validateAsLoaded(candidate, filepath.Dir(path))
+	})
 }
 
 // UpdateAdminKey updates the adminKeyHash in the configuration file at path.
 func UpdateAdminKey(path string, hash string) error {
-	var disk Config
-	data, err := readConfigFile(path, &disk)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-
-	fields := make(map[string]json.RawMessage)
-	if len(data) != 0 {
-		if err := json.Unmarshal(data, &fields); err != nil {
-			return fmt.Errorf("read saved config: %w", err)
+	return configfile.Patch(path, func(fields map[string]json.RawMessage) error {
+		hashJSON, err := json.Marshal(hash)
+		if err != nil {
+			return fmt.Errorf("encode admin key hash: %w", err)
 		}
-	}
-
-	hashJSON, err := json.Marshal(hash)
-	if err != nil {
-		return fmt.Errorf("encode admin key hash: %w", err)
-	}
-	fields["adminKeyHash"] = hashJSON
-
-	outData, err := json.MarshalIndent(fields, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode config: %w", err)
-	}
-	return saveConfigBytes(path, outData)
+		fields["adminKeyHash"] = hashJSON
+		return nil
+	}, nil)
 }
 
 func validateAsLoaded(data []byte, dir string) error {

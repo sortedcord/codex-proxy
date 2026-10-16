@@ -2,14 +2,12 @@
 package httputil
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"time"
+
+	"github.com/terastal-hq/proxylib/httpx"
 )
 
 const (
@@ -21,41 +19,22 @@ const (
 
 // ReadBounded reads from reader up to limit bytes, returning an error if limit is exceeded.
 func ReadBounded(reader io.Reader, limit int64) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, errors.New("body exceeds size limit")
-	}
-	return body, nil
+	return httpx.ReadBounded(reader, limit)
 }
 
 // JSONString unmarshals a JSON raw message into a string, returning empty string on failure.
 func JSONString(raw json.RawMessage) string {
-	var value string
-	_ = json.Unmarshal(raw, &value)
-	return value
+	return httpx.JSONString(raw)
 }
 
 // SetJSON encodes value into raw JSON and stores it in object under key.
 func SetJSON(object map[string]json.RawMessage, key string, value any) {
-	object[key], _ = json.Marshal(value)
+	httpx.SetJSON(object, key, value)
 }
 
 // BearerMatches checks in constant time whether request's Authorization Bearer token matches key.
 func BearerMatches(r *http.Request, key string) bool {
-	if key == "" {
-		return false
-	}
-	value := r.Header.Get("Authorization")
-	parts := strings.SplitN(value, " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return false
-	}
-	expected := sha256.Sum256([]byte(key))
-	provided := sha256.Sum256([]byte(parts[1]))
-	return subtle.ConstantTimeCompare(expected[:], provided[:]) == 1
+	return httpx.BearerMatches(r, key)
 }
 
 // RejectUnreadBody prevents the server from blocking while draining unread request bodies.

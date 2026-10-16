@@ -19,6 +19,7 @@ import (
 
 	"github.com/sortedcord/codex-proxy/internal/apikey"
 	"github.com/sortedcord/codex-proxy/internal/storage"
+	"github.com/terastal-hq/proxylib/privatefile"
 )
 
 const (
@@ -585,33 +586,7 @@ func saveConfigBytes(path string, data []byte) error {
 }
 
 func rejectDuplicateConfigFields(data []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	if _, err := decoder.Token(); err != nil {
-		return err
-	}
-	var keys []string
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		key, ok := token.(string)
-		if !ok {
-			continue
-		}
-		for _, previous := range keys {
-			if strings.EqualFold(key, previous) {
-				return fmt.Errorf("duplicate case-insensitive top-level config fields")
-			}
-		}
-		keys = append(keys, key)
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return err
-		}
-	}
-	_, err := decoder.Token()
-	return err
+	return privatefile.RejectDuplicateFields(data)
 }
 
 func loadLegacyAuthFile(path string) (*Account, error) {
