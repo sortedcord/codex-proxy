@@ -316,7 +316,7 @@ Strict linting and formatting use pinned development tooling (not runtime depend
 CODEX_PROXY_BIFROST_TEST=1 go test -race -run '^TestBifrostCompatibility$' ./internal/proxy
 ```
 
-CI tests the minimum Go 1.22, the Docker builder's exact Go 1.27.1, and stable Go.
+CI tests the minimum Go 1.22, the Docker builder's exact Go 1.27.2, and stable Go.
 The lint script uses v2.14.0 from `PATH` when available; otherwise it automatically
 installs that pinned version under `$XDG_CACHE_HOME/codex-proxy/tools` (or
 `$HOME/.cache/codex-proxy/tools`). It does not overwrite an older global linter.
