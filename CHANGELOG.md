@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0](https://github.com/terastal-hq/codex-proxy/compare/v0.6.0...v0.7.0) (2026-10-16)
+
+
+### Features
+
+* **ci:** unify CI/CD pipelines, code quality, and security workflows ([db6e96f](https://github.com/terastal-hq/codex-proxy/commit/db6e96f32ffbb9add5c6578e51b2aa8f6d9de6bc))
+
+
+### Bug Fixes
+
+* **ci:** update goreleaser-action pinned commit SHA to v6.4.0 ([e4e4739](https://github.com/terastal-hq/codex-proxy/commit/e4e47396e495d4a684cd0510c0bda0dc41dd5e7e))
+* **ci:** update goreleaser-action pinned commit SHA to v6.4.0 ([f2736bd](https://github.com/terastal-hq/codex-proxy/commit/f2736bdf0afa44acc918cd3eac25935bef731f05))
+* **ci:** update security workflow Go version to 1.27.2 to resolve stdlib CVEs ([6f80777](https://github.com/terastal-hq/codex-proxy/commit/6f807775b7ebe8fd851673aedba093885f3672e3))
+* **ci:** update to Go 1.27.2 for stdlib CVEs, fix actionlint warnings and pin alignment ([b91f111](https://github.com/terastal-hq/codex-proxy/commit/b91f111c7168c5a55d75311d73fa9af17d093cb5))
+
 ## [0.6.0](https://github.com/sortedcord/codex-proxy/compare/v0.5.0...v0.6.0) (2026-10-13)
 
 
